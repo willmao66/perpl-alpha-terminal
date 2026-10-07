@@ -86,7 +86,9 @@ def run_paper(data_dir: str, day: str, params: StrategyParams):
             mark = s.get("mrk", 0)
             # rate 单位推断 Micros：除以 1e6 得小数费率
             rate_frac = rate / 1_000_000 if rate else 0.0
-            d = st.update_market(sym, rate_frac, oracle, mark, ts)
+            # funding 事件（funding 帧到达）才算结算；state 帧只更新价格
+            is_funding = (kind == "funding")
+            d = st.update_market(sym, rate_frac, oracle, mark, ts, is_funding_event=is_funding)
             if d:
                 decisions.append(asdict_safe(d))
 

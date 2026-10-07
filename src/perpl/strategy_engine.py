@@ -28,6 +28,7 @@ class StrategyParams:
     # 风控参数（老铁拍板）
     leverage: float = 3.0                   # 平时 3x
     deviation_trigger: float = 0.15         # 累计偏离入场价 ±15% 触发清仓
+    funding_exit_threshold: float = 0.0     # 持仓中费率跌破此值 → 平仓（转负/无利可图就走）
     # 资金参数
     capital_usd: float = 10000.0            # 单市场分配资金（模拟盘用）
     # 数据源
@@ -80,8 +81,10 @@ class FundingArbStrategy:
 
     # ── 信号更新（由数据源驱动）──────────────────
     def update_market(self, market: str, funding_rate: float,
-                      oracle_price: float, mark_price: float, ts: int) -> Optional[Decision]:
-        """每收到一帧市场数据调用。返回决策（可能为 None = 无动作）"""
+                      oracle_price: float, mark_price: float, ts: int,
+                      is_funding_event: bool = False) -> Optional[Decision]:
+        """每收到一帧市场数据调用。is_funding_event=True 表示这是 funding 结算事件。
+        返回决策（可能为 None = 无动作）"""
         premium_bps = (mark_price - oracle_price) / oracle_price * 10000 if oracle_price else 0
         sig = {
             "ts": ts, "funding_rate": funding_rate, "oracle": oracle_price,
@@ -93,7 +96,7 @@ class FundingArbStrategy:
         if self.state == State.FLAT:
             return self._eval_open(market, sig)
         elif self.state == State.HEDGED:
-            return self._eval_hold(market, sig)
+            return self._eval_hold(market, sig, is_funding_event)
         elif self.state == State.TRIGGERED:
             return self._eval_reopen(market, sig)
         return None
@@ -122,12 +125,23 @@ class FundingArbStrategy:
         return d
 
     # ── 持仓监控（HEDGED）───────────────────────
-    def _eval_hold(self, market: str, sig: dict) -> Optional[Decision]:
+    def _eval_hold(self, market: str, sig: dict, is_funding_event: bool = False) -> Optional[Decision]:
         assert self.pos is not None
-        # 1) funding 累计（模拟：假设每帧近似结算，实际应按结算事件）
-        self.pos.funding_collected += self.pos.perp_size * sig["funding_rate"]
-        self.pos.funding_events += 1
-        self.pos.last_funding_rate = sig["funding_rate"]
+        # 1) funding 累计：仅在 funding 结算事件时累计（不是每帧 market_state）
+        if is_funding_event:
+            self.pos.funding_collected += self.pos.perp_size * sig["funding_rate"]
+            self.pos.funding_events += 1
+            self.pos.last_funding_rate = sig["funding_rate"]
+
+        # 1.5) 费率转负平仓：持仓中 funding 跌破阈值 → 平仓走人（不头铁死拿）
+        if is_funding_event and sig["funding_rate"] < self.p.funding_exit_threshold:
+            self.state = State.FLAT
+            d = Decision(sig["ts"], "CLOSE", market,
+                         f"费率转负 ({sig['funding_rate']:.6f})，平仓走人（累计funding={self.pos.funding_collected:.2f}）",
+                         sig["mark"], sig["funding_rate"], sig["premium_bps"], asdict(self.pos))
+            self.pos = None
+            self.decisions.append(d)
+            return d
 
         # 2) 偏离检测：|当前 - 入场| / 入场 ≥ 15%
         dev = abs(sig["mark"] - self.pos.entry_price) / self.pos.entry_price
