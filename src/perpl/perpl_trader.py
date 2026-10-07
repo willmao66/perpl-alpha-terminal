@@ -122,6 +122,7 @@ class PerplTradingClient:
     async def _read_until_snapshots(self, timeout: float = 15.0) -> None:
         """读取初始三个快照（wallet/orders/positions），seed rq"""
         deadline = time.time() + timeout
+        got_positions = False
         while time.time() < deadline:
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=5)
@@ -131,23 +132,29 @@ class PerplTradingClient:
             mt = frame.get("mt")
             if mt == MT["WALLET_SNAPSHOT"]:
                 self.wallet = frame
-                # 从 wallet 里取 account.lfr（最后请求 ID）seed rq
-                for acc in frame.get("d", {}).values():
+                # 账户在 as[] 数组里：取 id + lfr（rq 种子）
+                for acc in frame.get("as", []):
                     if isinstance(acc, dict):
-                        lfr = acc.get("lfr") or acc.get("last_request_id")
-                        if lfr:
-                            self._last_rq = max(self._last_rq, lfr)
-                        aid = acc.get("acc") or acc.get("id")
+                        lfr = acc.get("lfr", 0) or 0
+                        self._last_rq = max(self._last_rq, lfr)
+                        aid = acc.get("id")
                         if aid:
                             self._account_id = aid
-                log.info("WalletSnapshot: account=%s last_rq=%s", self._account_id, self._last_rq)
+                log.info("WalletSnapshot: addr=%s account=%s last_rq=%s",
+                         frame.get("addr"), self._account_id, self._last_rq)
             elif mt == MT["POSITIONS_SNAPSHOT"]:
-                for mid, pos in (frame.get("d") or {}).items():
-                    self.positions[mid] = pos
+                d = frame.get("d")
+                if isinstance(d, list):
+                    for pos in d:
+                        if isinstance(pos, dict) and pos.get("mkt") is not None:
+                            self.positions[pos["mkt"]] = pos
+                elif isinstance(d, dict):
+                    self.positions.update(d)
+                got_positions = True
                 log.info("PositionsSnapshot: %d 个持仓", len(self.positions))
             elif mt == MT["ORDERS_SNAPSHOT"]:
                 pass  # 初始订单快照，暂不处理
-            if self._account_id is not None:
+            if self._account_id is not None and got_positions:
                 break
 
     # ── 下单 ────────────────────────────────
@@ -215,9 +222,14 @@ class PerplTradingClient:
         async for raw in self._ws:
             frame = json.loads(raw)
             mt = frame.get("mt")
-            if mt == MT["POSITIONS_UPDATE"]:
-                for mid, pos in (frame.get("d") or {}).items():
-                    self.positions[mid] = pos
+            if mt == MT["POSITIONS_UPDATE"] or mt == MT["POSITIONS_SNAPSHOT"]:
+                d = frame.get("d")
+                if isinstance(d, list):  # PositionsUpdate d 是数组
+                    for pos in d:
+                        if isinstance(pos, dict) and pos.get("mkt") is not None:
+                            self.positions[pos["mkt"]] = pos
+                elif isinstance(d, dict):
+                    self.positions.update(d)
             if on_update:
                 await on_update(frame)
 
