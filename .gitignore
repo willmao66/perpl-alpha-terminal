@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data (runtime artifacts, not part of source)
+data/
+data_test/
+*.jsonl
+
+# Secrets
+.env
+config_local.py
