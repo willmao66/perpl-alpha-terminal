@@ -50,7 +50,8 @@ class PerplWSClient:
             for m in mids.values():
                 streams.append({"stream": f"trades@{m}", "subscribe": True})
         if self.cfg.subscribe_candles:
-            for m in mids.values():
+            # candles 流上限限制：最多订阅 ~6 个市场（11 个会 too many subscriptions）
+            for m in list(mids.values())[:6]:
                 streams.append({"stream": f"candles@{m}*{self.cfg.candle_resolution}", "subscribe": True})
         return streams
 
