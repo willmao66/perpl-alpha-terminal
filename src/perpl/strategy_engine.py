@@ -21,21 +21,39 @@ from typing import Dict, List, Optional
 log = logging.getLogger("perpl.strategy")
 
 
-# ── 参数配置（可调）──────────────────────────────
+# ── 参数配置（可配置，不写死）──────────────────
 @dataclass
 class StrategyParams:
     # 信号参数
-    funding_threshold: float = 0.00002      # rate > 2bp/次 才考虑开仓（待单位验证后校准）
+    funding_threshold: float = 0.00002      # rate > 2bp/次 才考虑开仓
     premium_min_bps: float = 0.5            # 实时溢价 ≥ 0.5bp 确认（防 rate 与溢价背离）
     # 风控参数（老铁 2026-10-08 拍板：单向 +15%，仅做空亏损方向=价格上涨触发）
-    leverage: float = 4.0                   # 4x 杠杆
+    leverage: float = 4.0                   # 杠杆倍数（可配置）
     deviation_trigger: float = 0.15         # 仅做空方向（价格上涨）+15% → 双腿平仓重开
     funding_exit_threshold: float = 0.0     # 持仓中费率跌破此值 → 平仓（转负/无利可图就走）
-    # 资金参数（10000U 口径，老铁 10-08 拍板）
-    collateral_usd: float = 2000.0          # 永续保证金 2000U
-    spot_usd: float = 8000.0                # 现货对冲 8000U
+    # 资金参数（测试案例：1000U 保证金 / 4x / 名义 4000U / 现货对冲 4000U，老铁 10-08 定）
+    collateral_usd: float = 1000.0          # 永续保证金
+    spot_usd: float = 0.0                   # 现货对冲（0 = 自动 = 名义 = collateral × leverage）
     # 数据源
     data_dir: str = "data"                  # 采集器落盘目录（模拟回放用）
+
+    def __post_init__(self):
+        """spot_usd 未显式配置时，自动 = 名义仓位（collateral × leverage），保证 delta 中性"""
+        if not self.spot_usd:
+            self.spot_usd = self.collateral_usd * self.leverage
+
+    @property
+    def perp_notional(self) -> float:
+        """永续名义仓位 = 保证金 × 杠杆"""
+        return self.collateral_usd * self.leverage
+
+    @classmethod
+    def from_file(cls, path: str) -> "StrategyParams":
+        """从 JSON 配置文件加载参数（项目/工具用途，参数不写死）"""
+        import json
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
 
 
 # ── 状态机 ──────────────────────────────────────
@@ -118,8 +136,8 @@ class FundingArbStrategy:
             market=market,
             entry_price=sig["mark"],
             entry_time=sig["ts"],
-            perp_size=self.p.collateral_usd * self.p.leverage,  # 2000×4 = 8000 名义
-            spot_size=self.p.spot_usd,                          # 8000 现货对冲
+            perp_size=self.p.perp_notional,   # 名义 = collateral × leverage
+            spot_size=self.p.spot_usd,        # 现货对冲
             last_funding_rate=fr,
         )
         d = Decision(sig["ts"], "OPEN", market, f"funding={fr:.6f} premium={sig['premium_bps']:.2f}bp 深升水开仓",
@@ -173,8 +191,8 @@ class FundingArbStrategy:
         self.state = State.HEDGED
         self.pos = Position(
             market=market, entry_price=sig["mark"], entry_time=sig["ts"],
-            perp_size=self.p.collateral_usd * self.p.leverage,  # 8000 名义
-            spot_size=self.p.spot_usd,                          # 8000 现货对冲
+            perp_size=self.p.perp_notional,   # 名义 = collateral × leverage
+            spot_size=self.p.spot_usd,        # 现货对冲
             last_funding_rate=fr,
         )
         d = Decision(sig["ts"], "OPEN", market,

@@ -6,9 +6,10 @@ import sys
 sys.path.insert(0, ".")
 from strategy_engine import FundingArbStrategy, StrategyParams
 
-params = StrategyParams()
-print(f"参数: 杠杆={params.leverage}x 保证金={params.collateral_usd} 现货={params.spot_usd} "
-      f"名义={params.collateral_usd*params.leverage} 触发=+{params.deviation_trigger*100:.0f}%")
+# 参数从配置文件加载（不写死）：测试案例 = 1000U 保证金 / 4x / 名义 4000 / 现货 4000
+params = StrategyParams.from_file("config/strategy_test.json")
+print(f"参数(配置): 杠杆={params.leverage}x 保证金={params.collateral_usd} 名义={params.perp_notional} "
+      f"现货={params.spot_usd} 触发=+{params.deviation_trigger*100:.0f}%")
 
 s = FundingArbStrategy(params)
 
