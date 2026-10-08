@@ -322,6 +322,18 @@ class AlphaTerminalBot:
             "head": self._head,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    async def _state_saver(self, interval: float = 60.0) -> None:
+        """定期保存状态（systemd 常驻时也能拿到最新 funding 累积）"""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self._save_state()
+                log.debug("状态已定期保存 (funding_events=%s, collected=%s)",
+                          self.strategy.pos.funding_events if self.strategy.pos else 0,
+                          self.strategy.pos.funding_collected if self.strategy.pos else 0)
+            except Exception as e:
+                log.error("定期保存状态失败: %s", e)
+
     # ── 主循环 ────────────────────────────────
     async def run(self) -> None:
         """并行跑 market-data WS + trading WS 监听"""
@@ -330,6 +342,8 @@ class AlphaTerminalBot:
         tasks.append(asyncio.create_task(self.market_ws.run()))
         if self.trader is not None:
             tasks.append(asyncio.create_task(self._trading_listen()))
+        # 定期保存状态（systemd 常驻）
+        tasks.append(asyncio.create_task(self._state_saver(interval=60.0)))
         log.info("Bot 运行中（%s, market=%s, dry_run=%s）...", self.network, self.market, self.dry_run)
         try:
             await asyncio.gather(*tasks)
