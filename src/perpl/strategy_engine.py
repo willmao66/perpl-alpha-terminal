@@ -1,9 +1,11 @@
 """Perpl Alpha Terminal - 策略引擎（Phase 2 核心）
 
-低频持仓型 funding arb（老铁 2026-10-07 拍板）：
+低频持仓型 funding arb（老铁 2026-10-07/10-08 拍板）：
 - 方向：funding > 0 深升水时 Perpl 永续空 + Kuru 现货多（单向，delta 中性）
 - 持仓：跨多个 43min 结算周期吃费率（低频，不做高频收割）
-- 风控：价格累计偏离入场价 ±15%（双向）→ 双腿平仓（组合平价，只亏手续费）→ 重开
+- 资金：10000U = 2000U 永续保证金(4x, 8000U 名义) + 8000U 现货对冲（10-08 拍板）
+- 风控：单向 +15%（仅做空亏损方向=价格上涨 +15% → 双腿平仓重开；下跌盈利方向不设阈值）
+- 附加：费率转负/跌破阈值 → 平仓走人（不头铁死拿）
 
 数据输入：采集器实时 funding + market state（或模拟回放）
 决策输出：JSON 决策记录（供模拟盘/执行层消费）
@@ -25,12 +27,13 @@ class StrategyParams:
     # 信号参数
     funding_threshold: float = 0.00002      # rate > 2bp/次 才考虑开仓（待单位验证后校准）
     premium_min_bps: float = 0.5            # 实时溢价 ≥ 0.5bp 确认（防 rate 与溢价背离）
-    # 风控参数（老铁拍板）
-    leverage: float = 3.0                   # 平时 3x
-    deviation_trigger: float = 0.15         # 累计偏离入场价 ±15% 触发清仓
+    # 风控参数（老铁 2026-10-08 拍板：单向 +15%，仅做空亏损方向=价格上涨触发）
+    leverage: float = 4.0                   # 4x 杠杆
+    deviation_trigger: float = 0.15         # 仅做空方向（价格上涨）+15% → 双腿平仓重开
     funding_exit_threshold: float = 0.0     # 持仓中费率跌破此值 → 平仓（转负/无利可图就走）
-    # 资金参数
-    capital_usd: float = 10000.0            # 单市场分配资金（模拟盘用）
+    # 资金参数（10000U 口径，老铁 10-08 拍板）
+    collateral_usd: float = 2000.0          # 永续保证金 2000U
+    spot_usd: float = 8000.0                # 现货对冲 8000U
     # 数据源
     data_dir: str = "data"                  # 采集器落盘目录（模拟回放用）
 
@@ -115,8 +118,8 @@ class FundingArbStrategy:
             market=market,
             entry_price=sig["mark"],
             entry_time=sig["ts"],
-            perp_size=self.p.capital_usd / self.p.leverage,
-            spot_size=self.p.capital_usd / self.p.leverage,
+            perp_size=self.p.collateral_usd * self.p.leverage,  # 2000×4 = 8000 名义
+            spot_size=self.p.spot_usd,                          # 8000 现货对冲
             last_funding_rate=fr,
         )
         d = Decision(sig["ts"], "OPEN", market, f"funding={fr:.6f} premium={sig['premium_bps']:.2f}bp 深升水开仓",
@@ -143,12 +146,13 @@ class FundingArbStrategy:
             self.decisions.append(d)
             return d
 
-        # 2) 偏离检测：|当前 - 入场| / 入场 ≥ 15%
-        dev = abs(sig["mark"] - self.pos.entry_price) / self.pos.entry_price
-        if dev >= self.p.deviation_trigger:
+        # 2) 偏离检测（单向 +15%）：仅做空亏损方向 = 价格上涨。下跌是盈利方向不设阈值
+        #    做空 MON：价格上涨 → 永续腿亏损，+15% 即双腿平仓重开（校准新起点）
+        dev_up = (sig["mark"] - self.pos.entry_price) / self.pos.entry_price
+        if dev_up >= self.p.deviation_trigger:
             self.state = State.TRIGGERED
             d = Decision(sig["ts"], "CLOSE", market,
-                         f"偏离 {dev*100:.1f}% ≥ 15%（3x 下单腿风险高），组合平价平仓重开",
+                         f"价格上涨 {dev_up*100:.1f}% ≥ +15%（做空亏损方向），双腿平仓重开（校准新起点）",
                          sig["mark"], sig["funding_rate"], sig["premium_bps"], asdict(self.pos))
             self.decisions.append(d)
             return d
@@ -169,8 +173,8 @@ class FundingArbStrategy:
         self.state = State.HEDGED
         self.pos = Position(
             market=market, entry_price=sig["mark"], entry_time=sig["ts"],
-            perp_size=self.p.capital_usd / self.p.leverage,
-            spot_size=self.p.capital_usd / self.p.leverage,
+            perp_size=self.p.collateral_usd * self.p.leverage,  # 8000 名义
+            spot_size=self.p.spot_usd,                          # 8000 现货对冲
             last_funding_rate=fr,
         )
         d = Decision(sig["ts"], "OPEN", market,
