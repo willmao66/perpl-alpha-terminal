@@ -1,0 +1,10 @@
+{
+  "funding_threshold": 0.00002,
+  "premium_min_bps": 0.5,
+  "leverage": 4.0,
+  "deviation_trigger": 0.15,
+  "funding_exit_threshold": 0.000005,
+  "collateral_usd": 5.0,
+  "spot_usd": 0.0,
+  "data_dir": "data"
+}
