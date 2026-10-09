@@ -84,6 +84,7 @@ class AlphaTerminalBot:
         self._state: Optional[dict] = None    # 最新 market-state（scaled）
         self._funding: Optional[dict] = None  # 最新 funding（scaled）
         self._head: int = 0                   # trading WS 最新 head block
+        self._last_funding_block: Optional[int] = None  # 上次结算 block（at.b，检测真实结算事件）
         self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._ops_log = []                    # 操作流水（决策+订单+账本）
         self._pending_confirm: Dict[int, asyncio.Event] = {}  # rq -> event
@@ -170,14 +171,29 @@ class AlphaTerminalBot:
         elif mt == 10:
             d = frame.get("d") or {}
             if str(self.market_id) in d:
-                self._funding = d[str(self.market_id)]
+                f = d[str(self.market_id)]
+                # 真实结算检测：funding event block (at.b) 变化 = 新结算周期
+                fb = (f.get("at") or {}).get("b")
+                is_settle = False
+                if fb is not None:
+                    if self._last_funding_block is None:
+                        # 首帧：记基准，不累计（避免把启动时的快照当结算）
+                        is_settle = False
+                    elif fb != self._last_funding_block:
+                        is_settle = True
+                    self._last_funding_block = fb
+                self._funding = f
+                # state 齐了才喂（结算事件才 is_funding_event=True）
+                if self._state is not None:
+                    await self._process_signal(is_funding=is_settle)
+                return
         else:
             return
 
         # state + funding 齐了才喂策略
         if self._state is None or self._funding is None:
             return
-        await self._process_signal(is_funding=(mt == 10))
+        await self._process_signal(is_funding=False)
 
     async def _process_signal(self, is_funding: bool) -> None:
         """喂策略引擎，处理决策"""
