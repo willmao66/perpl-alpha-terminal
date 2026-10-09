@@ -218,10 +218,11 @@ class AlphaTerminalBot:
         """执行决策：Perpl 真实下单（dry-run 模拟）+ Kuru 账本记账"""
         mark = dec.price
         if dec.action == "OPEN":
-            # size = 名义 / mark（MON size_dec=0 → 整数 MON）
-            size = max(1, round(self.p.perp_notional / mark))
-            log.info(">>> [OPEN] %s 永续开空 %s MON @ %s (名义 %sU) 杠杆%sx | %s",
-                     self.market, size, mark, self.p.perp_notional, self.p.leverage, dec.reason)
+            # size = 名义 / mark × 10^size_dec（scaled int，place_order 直接发链上）
+            # MON size_dec=0 → 整数 MON；ETH size_dec=3 → 0.001 ETH 粒度
+            size = max(1, round(self.p.perp_notional / mark * (10 ** self.size_dec)))
+            log.info(">>> [OPEN] %s 永续开空 %s %s @ %s (名义 %sU) 杠杆%sx | %s",
+                     self.market, size, self.market, mark, self.p.perp_notional, self.p.leverage, dec.reason)
             if not self.dry_run:
                 lv = int(self.p.leverage * 100)
                 ok = await self._place_and_confirm(2, size, lv, expect="open")
