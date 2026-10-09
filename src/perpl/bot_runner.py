@@ -194,6 +194,7 @@ class AlphaTerminalBot:
         dec = self.strategy.update_market(self.market, rate_frac, oracle, mark, ts,
                                           is_funding_event=is_funding)
         if dec and dec.action in ("OPEN", "CLOSE"):
+            log.info("决策: %s | reason: %s", dec.action, dec.reason)
             await self._execute(dec)
 
     # ── 执行 ──────────────────────────────────
@@ -203,8 +204,8 @@ class AlphaTerminalBot:
         if dec.action == "OPEN":
             # size = 名义 / mark（MON size_dec=0 → 整数 MON）
             size = max(1, round(self.p.perp_notional / mark))
-            log.info(">>> [OPEN] %s 永续开空 %s MON @ %s (名义 %sU) 杠杆%sx",
-                     self.market, size, mark, self.p.perp_notional, self.p.leverage)
+            log.info(">>> [OPEN] %s 永续开空 %s MON @ %s (名义 %sU) 杠杆%sx | %s",
+                     self.market, size, mark, self.p.perp_notional, self.p.leverage, dec.reason)
             if not self.dry_run:
                 lv = int(self.p.leverage * 100)
                 ok = await self._place_and_confirm(2, size, lv, expect="open")
@@ -214,7 +215,7 @@ class AlphaTerminalBot:
             self.ledger.open_spot(self.market, mark, dec.ts, notional_usd=self.p.spot_usd)
             self._ops_log.append({"ts": dec.ts, "action": "OPEN", "market": self.market,
                                   "size": size, "price": mark, "notional": self.p.spot_usd,
-                                  "dry_run": self.dry_run})
+                                  "reason": dec.reason, "dry_run": self.dry_run})
 
         elif dec.action == "CLOSE":
             # 平当前真实持仓（从 trader.positions 拿 size）
@@ -223,9 +224,9 @@ class AlphaTerminalBot:
                 pos = self.trader.positions.get(self.market_id, {})
                 size = pos.get("s", 0)
             if size <= 0:
-                log.warning(">>> [CLOSE] 无真实持仓可平，仅 Kuru 账本平仓")
+                log.warning(">>> [CLOSE] 无真实持仓可平，仅 Kuru 账本平仓 | %s", dec.reason)
             else:
-                log.info(">>> [CLOSE] %s 永续平空 %s MON @ %s", self.market, size, mark)
+                log.info(">>> [CLOSE] %s 永续平空 %s MON @ %s | %s", self.market, size, mark, dec.reason)
                 if not self.dry_run:
                     lv = int(self.p.leverage * 100)
                     ok = await self._place_and_confirm(4, size, lv, expect="close")
@@ -234,7 +235,8 @@ class AlphaTerminalBot:
                         return
             self.ledger.close_spot(self.market, mark, dec.ts)
             self._ops_log.append({"ts": dec.ts, "action": "CLOSE", "market": self.market,
-                                  "size": size, "price": mark, "dry_run": self.dry_run})
+                                  "size": size, "price": mark, "reason": dec.reason,
+                                  "dry_run": self.dry_run})
         self._flush_ops()
 
     async def _place_and_confirm(self, order_type: int, size: int, lv: int,
