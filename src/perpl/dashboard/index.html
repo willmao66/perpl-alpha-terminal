@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Perpl Alpha Terminal — Live Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14; --card: #141926; --card2: #1a2133; --border: #252e44;
+    --text: #e8ecf4; --muted: #8b93a7; --green: #22c55e; --red: #ef4444;
+    --blue: #3b82f6; --yellow: #eab308; --mono: 'SF Mono', Consolas, monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,'Segoe UI',sans-serif; padding:24px; }
+  .wrap { max-width:1100px; margin:0 auto; }
+
+  /* 顶栏 */
+  .topbar { display:flex; align-items:center; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
+  .logo { font-size:20px; font-weight:700; letter-spacing:.3px; }
+  .logo span { color:var(--blue); }
+  .badge { padding:4px 12px; border-radius:999px; font-size:13px; font-weight:600; }
+  .badge.on { background:rgba(34,197,94,.15); color:var(--green); border:1px solid rgba(34,197,94,.4); }
+  .badge.off { background:rgba(239,68,68,.15); color:var(--red); border:1px solid rgba(239,68,68,.4); }
+  .sub { color:var(--muted); font-size:13px; margin-left:auto; }
+
+  /* 卡片网格 */
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .card h3 { font-size:12px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px; }
+  .big { font-size:26px; font-weight:700; font-family:var(--mono); }
+  .big.green { color:var(--green); } .big.red { color:var(--red); } .big.blue { color:var(--blue); }
+  .small { font-size:12px; color:var(--muted); margin-top:4px; }
+
+  /* 两栏：曲线 + 持仓 */
+  .row2 { display:grid; grid-template-columns:1.4fr 1fr; gap:14px; margin-bottom:14px; }
+  .card.wide { grid-column:1; }
+  svg { width:100%; height:220px; display:block; }
+  .axis { stroke:var(--border); } .line { fill:none; stroke:var(--green); stroke-width:2; }
+  .line2 { fill:none; stroke:var(--blue); stroke-width:1.5; stroke-dasharray:4 3; }
+
+  /* 持仓详情 */
+  .pos-row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  .pos-row:last-child { border-bottom:none; }
+  .pos-row .k { color:var(--muted); } .pos-row .v { font-family:var(--mono); font-weight:600; }
+
+  /* 表格 */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; }
+  td { padding:8px 10px; border-bottom:1px solid var(--border); font-family:var(--mono); font-size:12px; }
+  tr:hover td { background:var(--card2); }
+  .tag { padding:2px 8px; border-radius:6px; font-size:11px; font-weight:700; }
+  .tag.open { background:rgba(34,197,94,.15); color:var(--green); }
+  .tag.close { background:rgba(239,68,68,.15); color:var(--red); }
+  .muted { color:var(--muted); }
+  .footer { color:var(--muted); font-size:12px; text-align:center; margin-top:24px; padding:12px 0 24px; }
+  .err { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3); color:var(--red); padding:20px; border-radius:12px; text-align:center; }
+  @media (max-width:900px){ .grid{grid-template-columns:repeat(2,1fr);} .row2{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="logo">Perpl <span>Alpha Terminal</span></div>
+    <div id="statusBadge" class="badge off">⏳ 加载中</div>
+    <div class="sub" id="subInfo">—</div>
+  </div>
+
+  <div id="errBox" style="display:none"></div>
+
+  <!-- 4 大卡片 -->
+  <div class="grid">
+    <div class="card"><h3>累计 Funding</h3><div class="big green" id="cFunding">—</div><div class="small" id="cFundingSub">—</div></div>
+    <div class="card"><h3>结算次数</h3><div class="big blue" id="cEvents">—</div><div class="small">约 43 分钟/次</div></div>
+    <div class="card"><h3>持仓期年化</h3><div class="big" id="cAnnual">—</div><div class="small" id="cAnnualSub">—</div></div>
+    <div class="card"><h3>Delta 对冲</h3><div class="big" id="cPnl">—</div><div class="small" id="cPnlSub">Kuru 现货腿(账本)</div></div>
+  </div>
+
+  <!-- 曲线 + 持仓 -->
+  <div class="row2">
+    <div class="card wide">
+      <h3>Funding 累计曲线（时间序列）</h3>
+      <svg id="chart" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card">
+      <h3>当前持仓</h3>
+      <div id="posBox"><div class="muted" style="padding:10px 0">—</div></div>
+    </div>
+  </div>
+
+  <!-- 执行/风控记录 -->
+  <div class="card">
+    <h3>执行 / 风控记录</h3>
+    <table>
+      <thead><tr><th>时间</th><th>动作</th><th>市场</th><th>价格</th><th>名义</th><th>原因</th></tr></thead>
+      <tbody id="opsBody"><tr><td colspan="6" class="muted">—</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="footer">
+    Perpl Alpha Terminal · Monad Metropolis 2026 · 数据每 60s 刷新 · 操作走命令行（见仓库 README）
+  </div>
+</div>
+
+<script>
+const API = '/perpl/api';
+let state = null, history = [];
+
+async function loadStatus() {
+  try {
+    const r = await fetch(API + '/status');
+    state = await r.json();
+    renderStatus();
+  } catch(e) { showErr('无法连接后端 API'); }
+}
+async function loadHistory() {
+  try {
+    const r = await fetch(API + '/history');
+    history = (await r.json()).points || [];
+    renderChart();
+  } catch(e) {}
+}
+async function loadOps() {
+  try {
+    const r = await fetch(API + '/ops?limit=50');
+    const d = await r.json();
+    renderOps(d.ops || []);
+  } catch(e) {}
+}
+
+function showErr(msg) {
+  const box = document.getElementById('errBox');
+  box.style.display = 'block';
+  box.className = 'err';
+  box.textContent = '⚠️ ' + msg;
+}
+
+function fmtU(v) {
+  if (v === null || v === undefined) return '—';
+  return (v >= 0 ? '+' : '') + Number(v).toFixed(4) + ' U';
+}
+function fmtPct(v) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toFixed(1) + '%';
+}
+
+function renderStatus() {
+  if (!state || !state.online) { showErr(state?.error || 'bot 离线'); return; }
+  const b = document.getElementById('statusBadge');
+  b.className = 'badge on'; b.textContent = '🟢 运行中 · ' + state.network;
+  document.getElementById('subInfo').textContent =
+    'run: ' + state.run_id + ' · 已运行 ' + state.uptime_hours + 'h' +
+    ' · 监控 ' + state.markets_watched + ' 市场' +
+    ' · ' + (state.dry_run ? 'dry-run' : '真实执行');
+
+  document.getElementById('cFunding').textContent = fmtU(state.position?.funding_collected);
+  document.getElementById('cFundingSub').textContent = '费率 ' + (state.position?.last_funding_rate ?? 0) + ' micro';
+  document.getElementById('cEvents').textContent = state.position?.funding_events ?? '—';
+  document.getElementById('cAnnual').textContent = fmtPct(state.annualized_pct);
+  document.getElementById('cAnnualSub').textContent = '名义 ' + (state.params?.notional ?? '—') + 'U · ' + (state.params?.leverage ?? '—') + 'x';
+  const pnl = state.ledger?.total_pnl;
+  const pnlEl = document.getElementById('cPnl');
+  pnlEl.textContent = fmtU(pnl);
+  pnlEl.className = 'big ' + (pnl >= 0 ? 'green' : 'red');
+  document.getElementById('cPnlSub').textContent = '浮盈 ' + fmtU(state.ledger?.total_unrealized_pnl);
+
+  // 持仓
+  const pos = state.position;
+  const box = document.getElementById('posBox');
+  if (!pos) { box.innerHTML = '<div class="muted">空仓（FLAT，扫描中）</div>'; return; }
+  const rows = [
+    ['市场', pos.market],
+    ['方向', '空 (Short)'],
+    ['入场价', pos.entry_price],
+    ['永续规模', pos.perp_size + ' U'],
+    ['现货对冲', pos.spot_size + ' U'],
+    ['已吃次数', pos.funding_events],
+    ['累计 funding', fmtU(pos.funding_collected)],
+    ['策略状态', state.strategy_state],
+  ];
+  box.innerHTML = rows.map(([k,v]) =>
+    '<div class="pos-row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'
+  ).join('');
+}
+
+function renderChart() {
+  const svg = document.getElementById('chart');
+  const pts = history;
+  if (!pts || pts.length < 2) {
+    svg.innerHTML = '<text x="50" y="50" text-anchor="middle" fill="#8b93a7" font-size="6">积累数据中…（每 60s 一个点）</text>';
+    return;
+  }
+  const W = 100, H = 100, P = { l:6, r:4, t:8, b:12 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const vals = pts.map(p => p.funding_collected);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = (max - min) || 1;
+  const x = i => P.l + (i / (pts.length - 1)) * iw;
+  const y = v => P.t + ih - ((v - min) / span) * ih;
+  const path = pts.map((p,i) => (i===0?'M':'L') + x(i).toFixed(2) + ',' + y(p.funding_collected).toFixed(2)).join('');
+  // 网格线
+  let grid = '';
+  for (let g=0; g<=4; g++) {
+    const gy = P.t + (g/4)*ih;
+    grid += `<line class="axis" x1="${P.l}" y1="${gy}" x2="${W-P.r}" y2="${gy}"/>`;
+  }
+  svg.innerHTML =
+    grid +
+    `<path class="line" d="${path}"/>` +
+    // 标注最新值
+    `<text x="${W-P.r}" y="${y(vals[vals.length-1])-1.5}" text-anchor="end" fill="#22c55e" font-size="4.5" font-family="monospace">${Number(vals[vals.length-1]).toFixed(4)}</text>` +
+    `<text x="${P.l}" y="${H-3}" fill="#8b93a7" font-size="4">${pts[0].time}</text>` +
+    `<text x="${W-P.r}" y="${H-3}" text-anchor="end" fill="#8b93a7" font-size="4">${pts[pts.length-1].time}</text>`;
+}
+
+function renderOps(ops) {
+  const body = document.getElementById('opsBody');
+  if (!ops.length) { body.innerHTML = '<tr><td colspan="6" class="muted">暂无操作记录</td></tr>'; return; }
+  body.innerHTML = ops.map(o => {
+    const t = new Date(o.ts).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+    const tag = o.action === 'OPEN' ? 'open' : 'close';
+    return `<tr>
+      <td>${t}</td>
+      <td><span class="tag ${tag}">${o.action}</span></td>
+      <td>${o.market || '—'}</td>
+      <td>${o.price ?? '—'}</td>
+      <td>${o.notional ?? '—'}</td>
+      <td>${o.reason || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// 每 60s 刷新（与 history 积累同频）
+loadStatus(); loadHistory(); loadOps();
+setInterval(() => { loadStatus(); loadHistory(); loadOps(); }, 60000);
+</script>
+</body>
+</html>
