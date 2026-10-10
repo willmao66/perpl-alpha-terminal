@@ -163,6 +163,40 @@ python -m venv .venv
 .\.venv\Scripts\python bot_runner.py --market MON --config config/bridge_test.json
 ```
 
+## Operations Manual (live bot on VPS)
+
+All commands run on the VPS as user `ubuntu` (systemd service: `perpl-alpha-terminal`).
+Dashboard (read-only): <http://yz.ttgames.xyz/perpl/>
+
+```bash
+# Service lifecycle
+sudo systemctl status perpl-alpha-terminal   # running? last state save?
+sudo systemctl restart perpl-alpha-terminal  # apply new config / code
+sudo systemctl stop perpl-alpha-terminal     # stop trading
+sudo systemctl start perpl-alpha-terminal    # start trading
+
+# Logs
+journalctl -u perpl-alpha-terminal -n 100    # last 100 lines
+journalctl -u perpl-alpha-terminal -f        # follow live
+
+# Latest bot state (60s auto-save: strategy state, funding events, pnl)
+ls -t src/perpl/data/bot_state_*.json | head -1 | xargs cat
+
+# Trade log (every OPEN/CLOSE with price/size/reason)
+cat src/perpl/data/bot_ops_*.jsonl
+
+# Read-only position check (ALWAYS use this, never close_all_positions for inspection)
+cd src/perpl && .venv/bin/python check_positions_ro.py
+```
+
+> ⚠️ `close_all_positions.py` exists but is **not** for inspection — it sends real close orders.
+> Use `check_positions_ro.py` (read-only) to check positions first.
+
+Config lives in `src/perpl/config/*.json` (e.g. `vps_eth.json`): `collateral_usd`, `leverage`
+(perp notional = collateral × leverage), `funding_threshold`, `funding_exit_threshold`
+(rate below this → close), `deviation_trigger` (price move → rebalance). API keys are in
+`config_local.py` (gitignored, never committed).
+
 ## Key Facts (verified from official docs)
 
 - WS market-data: `wss://app.perpl.xyz/ws/v1/market-data` (public); trading WS: `wss://app.perpl.xyz/ws/v1/trading` (Ed25519-signed)
@@ -175,7 +209,7 @@ python -m venv .venv
 
 - [x] Phase 1: Perpl data collector (live, mainnet)
 - [x] Phase 2: Funding arb strategy + delta-neutral execution (testnet live, txids)
-- [ ] Phase 3: Analytics / risk dashboard
+- [x] Phase 3: Analytics / risk dashboard (read-only, live at yz.ttgames.xyz/perpl)
 - [ ] Phase 4: HyperLiquid adapter (cross-venue funding comparison)
 
 ## License
