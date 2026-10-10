@@ -212,6 +212,26 @@ function renderChart() {
     `<text x="${W-P.r}" y="${H-3}" text-anchor="end" fill="#8b93a7" font-size="4">${pts[pts.length-1].time}</text>`;
 }
 
+function translateReason(r) {
+  if (!r) return r;
+  // legacy ops may contain zh-CN reasons written by pre-i18n bot code
+  if (!/[\u4e00-\u9fff]/.test(r)) return r;
+  const dict = [
+    // zh: shen sheng shui kai cang -> deep premium open
+    [/\u6df1\u5347\u6c34\u5f00\u4ed3/g, 'deep premium open'],
+    // zh: fei lv zhuan fu ... ping cang -> funding turned negative, closing
+    [/\u8d39\u7387\u8f6c\u8d1f\s*\(([^)]+)\)\uff0c\u5e73\u4ed3\u8d70\u4eba\uff08\u7d2f\u8ba1funding=([\d.]+)\uff09/g, 'funding turned negative ($1), closing (cumulative funding=$2)'],
+    // zh: jia ge shang zhang >= +15% ... -> adverse price move, recalibrate
+    [/\u4ef7\u683c\u4e0a\u6da8\s*([\d.]+)%\s*\u2265\s*\+15%\uff08\u505a\u7a7a\u4e8f\u635f\u65b9\u5411\uff09\uff0c\u53cc\u817f\u5e73\u4ed3\u91cd\u5f00\uff08\u6821\u51c6\u65b0\u8d77\u70b9\uff09/g, 'price rose $1% >= +15% (adverse for short), closing both legs to recalibrate'],
+    // zh: ping cang hou ji hui xiao shi -> opportunity gone after close
+    [/\u89e6\u53d1\u5e73\u4ed3\u540e\u673a\u4f1a\u6d88\u5931\uff08funding \u56de\u843d\uff09\uff0c\u56de\u7a7a\u4ed3\u7b49\u5f85/g, 'opportunity gone after close (funding decayed), back to flat'],
+    // zh: pian li hou zhong kai -> reopen after deviation
+    [/\u504f\u79bb\u540e\u91cd\u5f00\uff08\u65b0\u57fa\u51c6\s*([\d.]+)\uff09/g, 'reopen after deviation (new baseline $1)'],
+  ];
+  for (const [re, en] of dict) r = r.replace(re, en);
+  return r;
+}
+
 function renderOps(ops) {
   const body = document.getElementById('opsBody');
   if (!ops.length) { body.innerHTML = '<tr><td colspan="6" class="muted">No operations yet</td></tr>'; return; }
@@ -224,7 +244,7 @@ function renderOps(ops) {
       <td>${o.market || '—'}</td>
       <td>${o.price ?? '—'}</td>
       <td>${o.notional ?? '—'}</td>
-      <td>${o.reason || '—'}</td>
+      <td>${translateReason(o.reason) || '—'}</td>
     </tr>`;
   }).join('');
 }
