@@ -1,13 +1,13 @@
-"""Perpl Alpha Terminal Dashboard API（只读展示）
+"""Perpl Alpha Terminal Dashboard API (read-only)
 
-- 只读：不提供任何写/操作接口（操作走命令行，见公仓 README）
-- 数据源：bot 运行时落盘文件（bot_state_*.json / bot_ops_*.jsonl）
-- 后台任务：每 60s 读最新 bot_state，append 到 history.jsonl（收益曲线积累）
+- Read-only: no write/operation endpoints (operations go through CLI, see repo README)
+- Data source: files persisted by the running bot (bot_state_*.json / bot_ops_*.jsonl)
+- Background task: every 60s reads the latest bot_state, appends to history.jsonl (PnL curve)
 
 API:
-    GET /api/status   → 运行状态 / 持仓 / 收益 / 损耗汇总
-    GET /api/history  → 收益时间序列（曲线）
-    GET /api/ops      → 执行 / 风控记录
+    GET /api/status   -> run status / position / pnl summary
+    GET /api/history  -> pnl time series (curve)
+    GET /api/ops      -> execution / risk log
 """
 import asyncio
 import glob
@@ -25,10 +25,10 @@ from fastapi.staticfiles import StaticFiles
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("perpl.dash")
 
-# ── 配置 ─────────────────────────────────────
+# ── config ─────────────────────────────────────
 DATA_DIR = Path(os.environ.get("PERPL_DATA_DIR", "/home/ubuntu/perpl-alpha-terminal/src/perpl/data"))
 HISTORY_FILE = DATA_DIR / "history.jsonl"
-HISTORY_INTERVAL = float(os.environ.get("PERPL_HISTORY_INTERVAL", "60"))  # 秒
+HISTORY_INTERVAL = float(os.environ.get("PERPL_HISTORY_INTERVAL", "60"))  # seconds
 STATIC_DIR = Path(os.environ.get("PERPL_STATIC_DIR", Path(__file__).parent))
 
 app = FastAPI(title="Perpl Alpha Terminal Dashboard", version="1.0.0")
@@ -40,12 +40,12 @@ app.add_middleware(
 )
 
 
-# ── 数据读取 ─────────────────────────────────
+# ── data reading ─────────────────────────────────
 def latest_state_file() -> Optional[Path]:
     files = sorted(glob.glob(str(DATA_DIR / "bot_state_*.json")))
     if not files:
         return None
-    # 取最新修改的（60s 定期覆盖）
+    # most recently modified (60s periodic overwrite)
     return max((Path(f) for f in files), key=lambda p: p.stat().st_mtime)
 
 
@@ -56,12 +56,12 @@ def read_latest_state() -> Optional[dict]:
     try:
         return json.loads(f.read_text(encoding="utf-8"))
     except Exception as e:
-        log.warning("读状态文件失败 %s: %s", f.name, e)
+        log.warning("failed to read state file %s: %s", f.name, e)
         return None
 
 
 def read_ops() -> list:
-    """读取所有 bot_ops_*.jsonl，按时间排序"""
+    """Read all bot_ops_*.jsonl, sorted by time"""
     ops = []
     for f in sorted(glob.glob(str(DATA_DIR / "bot_ops_*.jsonl"))):
         try:
@@ -70,7 +70,7 @@ def read_ops() -> list:
                 if line:
                     ops.append(json.loads(line))
         except Exception as e:
-            log.warning("读 ops 失败 %s: %s", f, e)
+            log.warning("failed to read ops %s: %s", f, e)
     ops.sort(key=lambda x: x.get("ts", 0))
     return ops
 
@@ -85,7 +85,7 @@ def read_history() -> list:
             if line:
                 rows.append(json.loads(line))
     except Exception as e:
-        log.warning("读 history 失败: %s", e)
+        log.warning("failed to read history: %s", e)
     return rows
 
 
@@ -93,16 +93,16 @@ def ts_to_str(ts: int) -> str:
     return datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M") if ts else ""
 
 
-# ── 汇总计算 ─────────────────────────────────
+# ── summary computation ─────────────────────────────────
 def compute_status(state: Optional[dict]) -> dict:
     if not state:
-        return {"online": False, "error": "未找到 bot 状态文件"}
+        return {"online": False, "error": "no bot state file found"}
 
     strategy = state.get("strategy", {})
     pos = strategy.get("position")
     ledger = state.get("kuru_ledger", {})
 
-    # 运行时长：从 run_id 推断（YYYYMMDD_HHMMSS）
+    # uptime: infer from run_id (YYYYMMDD_HHMMSS)
     run_id = state.get("run_id", "")
     started_ts = None
     try:
@@ -114,7 +114,7 @@ def compute_status(state: Optional[dict]) -> dict:
     funding_events = pos.get("funding_events", 0) if pos else 0
     last_rate = pos.get("last_funding_rate", 0) if pos else 0
 
-    # 年化估算：funding_collected / notional / 运行小时 * 8760
+    # annualized estimate: funding_collected / notional / hours * 8760
     annualized = 0.0
     notional = state.get("params", {}).get("collateral_usd", 0) * state.get("params", {}).get("leverage", 0)
     if started_ts and funding_collected > 0 and notional > 0:
@@ -180,9 +180,9 @@ def compute_history() -> dict:
     }
 
 
-# ── 后台任务：history 积累 ───────────────────
+# ── background task: history accumulation ───────────────────
 async def history_saver():
-    log.info("history 积累任务启动（每 %ss 一次）", HISTORY_INTERVAL)
+    log.info("history accumulation task started (every %ss)", HISTORY_INTERVAL)
     while True:
         try:
             state = read_latest_state()
@@ -202,7 +202,7 @@ async def history_saver():
                 with open(HISTORY_FILE, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception as e:
-            log.error("history 积累失败: %s", e)
+            log.error("history accumulation failed: %s", e)
         await asyncio.sleep(HISTORY_INTERVAL)
 
 
@@ -226,11 +226,11 @@ async def api_history():
 @app.get("/api/ops")
 async def api_ops(limit: int = 100):
     ops = read_ops()
-    # 按时间倒序，取最近 limit 条
+    # newest first, take the most recent `limit` entries
     ops.reverse()
     return {"total": len(ops), "ops": ops[:limit]}
 
 
-# 静态前端（/perpl/ 由 nginx 直接托管时此挂载可省略，保留作本地开发）
+# static frontend (mount is optional when /perpl/ is served directly by nginx; kept for local dev)
 if (STATIC_DIR / "index.html").exists():
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

@@ -1,14 +1,14 @@
-"""Perpl Alpha Terminal - 策略引擎（Phase 2 核心）
+"""Perpl Alpha Terminal - Strategy Engine (Phase 2 core)
 
-低频持仓型 funding arb（老铁 2026-10-07/10-08 拍板）：
-- 方向：funding > 0 深升水时 Perpl 永续空 + Kuru 现货多（单向，delta 中性）
-- 持仓：跨多个 43min 结算周期吃费率（低频，不做高频收割）
-- 资金：10000U = 2000U 永续保证金(4x, 8000U 名义) + 8000U 现货对冲（10-08 拍板）
-- 风控：单向 +15%（仅做空亏损方向=价格上涨 +15% → 双腿平仓重开；下跌盈利方向不设阈值）
-- 附加：费率转负/跌破阈值 → 平仓走人（不头铁死拿）
+Low-frequency hold funding arb (decided on 2026-10-07/10-08):
+- Direction: when funding > 0 deep premium, Perpl perpetual short + Kuru spot long (one-way, delta neutral)
+- Hold: capture funding across multiple 43min settlement periods (low frequency, no high-frequency harvesting)
+- Capital: 10000U = 2000U perpetual collateral (4x, 8000U notional) + 8000U spot hedge (decided on 10-08)
+- Risk: one-way +15% (only the short-loss direction = price rise +15% -> close both legs and reopen; no threshold on the profit direction = price fall)
+- Extra: when rate turns negative / drops below threshold -> close and exit (do not stubbornly hold)
 
-数据输入：采集器实时 funding + market state（或模拟回放）
-决策输出：JSON 决策记录（供模拟盘/执行层消费）
+Data input: collector real-time funding + market state (or simulated replay)
+Decision output: JSON decision records (for paper trading / execution layer consumption)
 """
 import json
 import logging
@@ -21,64 +21,64 @@ from typing import Dict, List, Optional
 log = logging.getLogger("perpl.strategy")
 
 
-# ── 参数配置（可配置，不写死）──────────────────
+# ── Parameter config (configurable, not hard-coded) ──
 @dataclass
 class StrategyParams:
-    # 信号参数
-    funding_threshold: float = 0.00002      # rate > 2bp/次 才考虑开仓
-    premium_min_bps: float = 0.5            # 实时溢价 ≥ 0.5bp 确认（防 rate 与溢价背离）
-    # 风控参数（老铁 2026-10-08 拍板：单向 +15%，仅做空亏损方向=价格上涨触发）
-    leverage: float = 4.0                   # 杠杆倍数（可配置）
-    deviation_trigger: float = 0.15         # 仅做空方向（价格上涨）+15% → 双腿平仓重开
-    funding_exit_threshold: float = 0.0     # 持仓中费率跌破此值 → 平仓（转负/无利可图就走）
-    # 资金参数（测试案例：1000U 保证金 / 4x / 名义 4000U / 现货对冲 4000U，老铁 10-08 定）
-    collateral_usd: float = 1000.0          # 永续保证金
-    spot_usd: float = 0.0                   # 现货对冲（0 = 自动 = 名义 = collateral × leverage）
-    # 数据源
-    data_dir: str = "data"                  # 采集器落盘目录（模拟回放用）
+    # Signal params
+    funding_threshold: float = 0.00002      # consider opening only when rate > 2bp per event
+    premium_min_bps: float = 0.5            # real-time premium >= 0.5bp to confirm (prevent rate/premium divergence)
+    # Risk-control params (decided on 2026-10-08: one-way +15%, only the short-loss direction = price rise triggers)
+    leverage: float = 4.0                   # leverage multiplier (configurable)
+    deviation_trigger: float = 0.15         # short-only direction (price rise) +15% -> close both legs and reopen
+    funding_exit_threshold: float = 0.0     # exit when the rate while holding drops below this (leave when negative/unprofitable)
+    # Capital params (test case: 1000U collateral / 4x / notional 4000U / spot hedge 4000U, decided on 10-08)
+    collateral_usd: float = 1000.0          # perpetual collateral
+    spot_usd: float = 0.0                   # spot hedge (0 = auto = notional = collateral x leverage)
+    # Data source
+    data_dir: str = "data"                  # collector data directory (for simulated replay)
 
     def __post_init__(self):
-        """spot_usd 未显式配置时，自动 = 名义仓位（collateral × leverage），保证 delta 中性"""
+        """When spot_usd is not explicitly configured, auto-set to notional position (collateral x leverage) to guarantee delta neutrality"""
         if not self.spot_usd:
             self.spot_usd = self.collateral_usd * self.leverage
 
     @property
     def perp_notional(self) -> float:
-        """永续名义仓位 = 保证金 × 杠杆"""
+        """Perpetual notional position = collateral x leverage"""
         return self.collateral_usd * self.leverage
 
     @classmethod
     def from_file(cls, path: str) -> "StrategyParams":
-        """从 JSON 配置文件加载参数（项目/工具用途，参数不写死）"""
+        """Load params from a JSON config file (project/tool usage, params not hard-coded)"""
         import json
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
 
 
-# ── 状态机 ──────────────────────────────────────
+# ── State machine ──────────────────────────────────
 class State:
-    FLAT = "FLAT"              # 空仓，等机会
-    HEDGED = "HEDGED"          # 持仓中（Perpl 空 + Kuru 多）
-    TRIGGERED = "TRIGGERED"    # 偏离超限，等待平仓确认
-    REBALANCING = "REBALANCING"  # 平仓重开中
+    FLAT = "FLAT"              # flat, waiting for an opportunity
+    HEDGED = "HEDGED"          # holding (Perpl short + Kuru long)
+    TRIGGERED = "TRIGGERED"    # deviation exceeded, waiting for close confirmation
+    REBALANCING = "REBALANCING"  # closing and reopening
 
 
 @dataclass
 class Position:
     market: str = ""
-    entry_price: float = 0.0       # 入场价（oracle/mark）
-    entry_time: int = 0            # 入场时间戳 ms
-    perp_size: float = 0.0         # Perpl 永续空头名义
-    spot_size: float = 0.0         # Kuru 现货多头名义
-    funding_collected: float = 0.0 # 累计吃到的 funding（模拟）
+    entry_price: float = 0.0       # entry price (oracle/mark)
+    entry_time: int = 0            # entry timestamp ms
+    perp_size: float = 0.0         # Perpl perpetual short notional
+    spot_size: float = 0.0         # Kuru spot long notional
+    funding_collected: float = 0.0 # cumulative funding captured (simulated)
     last_funding_rate: float = 0.0
-    funding_events: int = 0        # 吃到的结算次数
+    funding_events: int = 0        # number of settlements captured
 
 
 @dataclass
 class Decision:
-    """策略决策输出（模拟盘/执行层消费）"""
+    """Strategy decision output (consumed by paper trading / execution layer)"""
     ts: int
     action: str                     # OPEN / CLOSE / HOLD / NOOP
     market: str
@@ -86,26 +86,26 @@ class Decision:
     price: float
     funding_rate: float
     premium_bps: float
-    pos: Optional[dict] = None      # 当前持仓快照
+    pos: Optional[dict] = None      # current position snapshot
     params_snapshot: Optional[dict] = None
 
 
 class FundingArbStrategy:
-    """funding arb 策略引擎（低频持仓型）"""
+    """Funding arb strategy engine (low-frequency hold)"""
 
     def __init__(self, params: Optional[StrategyParams] = None):
         self.p = params or StrategyParams()
         self.state = State.FLAT
         self.pos: Optional[Position] = None
         self.decisions: List[Decision] = []
-        self._last_signals: Dict[str, dict] = {}   # market -> 最新信号
+        self._last_signals: Dict[str, dict] = {}   # market -> latest signal
 
-    # ── 信号更新（由数据源驱动）──────────────────
+    # ── Signal update (driven by data source) ──────
     def update_market(self, market: str, funding_rate: float,
                       oracle_price: float, mark_price: float, ts: int,
                       is_funding_event: bool = False) -> Optional[Decision]:
-        """每收到一帧市场数据调用。is_funding_event=True 表示这是 funding 结算事件。
-        返回决策（可能为 None = 无动作）"""
+        """Called on every market data frame. is_funding_event=True means this is a funding settlement event.
+        Returns a decision (None = no action)"""
         premium_bps = (mark_price - oracle_price) / oracle_price * 10000 if oracle_price else 0
         sig = {
             "ts": ts, "funding_rate": funding_rate, "oracle": oracle_price,
@@ -113,7 +113,7 @@ class FundingArbStrategy:
         }
         self._last_signals[market] = sig
 
-        # 状态机流转
+        # State machine transition
         if self.state == State.FLAT:
             return self._eval_open(market, sig)
         elif self.state == State.HEDGED:
@@ -122,86 +122,86 @@ class FundingArbStrategy:
             return self._eval_reopen(market, sig)
         return None
 
-    # ── 开仓评估（FLAT → HEDGED）────────────────
+    # ── Open evaluation (FLAT -> HEDGED) ────────
     def _eval_open(self, market: str, sig: dict) -> Optional[Decision]:
         fr = sig["funding_rate"]
         if fr < self.p.funding_threshold:
             return None
-        # 溢价确认：rate 高但已贴水 → 费率将回落，不追（背离保护）
+        # Premium confirmation: rate high but already at discount -> rate will fall, do not chase (divergence protection)
         if sig["premium_bps"] < self.p.premium_min_bps:
             return None
-        # 开仓
+        # Open
         self.state = State.HEDGED
         self.pos = Position(
             market=market,
             entry_price=sig["mark"],
             entry_time=sig["ts"],
-            perp_size=self.p.perp_notional,   # 名义 = collateral × leverage
-            spot_size=self.p.spot_usd,        # 现货对冲
+            perp_size=self.p.perp_notional,   # notional = collateral x leverage
+            spot_size=self.p.spot_usd,        # spot hedge
             last_funding_rate=fr,
         )
-        d = Decision(sig["ts"], "OPEN", market, f"funding={fr:.6f} premium={sig['premium_bps']:.2f}bp 深升水开仓",
+        d = Decision(sig["ts"], "OPEN", market, f"funding={fr:.6f} premium={sig['premium_bps']:.2f}bp deep premium open",
                      sig["mark"], fr, sig["premium_bps"], asdict(self.pos))
         self.decisions.append(d)
         return d
 
-    # ── 持仓监控（HEDGED）───────────────────────
+    # ── Position monitoring (HEDGED) ───────────
     def _eval_hold(self, market: str, sig: dict, is_funding_event: bool = False) -> Optional[Decision]:
         assert self.pos is not None
-        # 1) funding 累计：仅在 funding 结算事件时累计（不是每帧 market_state）
+        # 1) Funding accumulation: only accumulate on funding settlement events (not every market_state frame)
         if is_funding_event:
             self.pos.funding_collected += self.pos.perp_size * sig["funding_rate"]
             self.pos.funding_events += 1
             self.pos.last_funding_rate = sig["funding_rate"]
 
-        # 1.5) 费率转负平仓：持仓中 funding 跌破阈值 → 平仓走人（不头铁死拿）
+        # 1.5) Close on negative rate: while holding, if funding drops below the threshold -> close and exit (do not stubbornly hold)
         if is_funding_event and sig["funding_rate"] < self.p.funding_exit_threshold:
             self.state = State.FLAT
             d = Decision(sig["ts"], "CLOSE", market,
-                         f"费率转负 ({sig['funding_rate']:.6f})，平仓走人（累计funding={self.pos.funding_collected:.2f}）",
+                         f"Rate turned negative ({sig['funding_rate']:.6f}), closing (cumulative funding={self.pos.funding_collected:.2f})",
                          sig["mark"], sig["funding_rate"], sig["premium_bps"], asdict(self.pos))
             self.pos = None
             self.decisions.append(d)
             return d
 
-        # 2) 偏离检测（单向 +15%）：仅做空亏损方向 = 价格上涨。下跌是盈利方向不设阈值
-        #    做空 MON：价格上涨 → 永续腿亏损，+15% 即双腿平仓重开（校准新起点）
+        # 2) Deviation detection (one-way +15%): only the short-loss direction = price rise. No threshold on the price-fall (profit) direction
+        #    Short MON: price rise -> perpetual leg loss, at +15% close both legs and reopen (recalibrate to a new baseline)
         dev_up = (sig["mark"] - self.pos.entry_price) / self.pos.entry_price
         if dev_up >= self.p.deviation_trigger:
             self.state = State.TRIGGERED
             d = Decision(sig["ts"], "CLOSE", market,
-                         f"价格上涨 {dev_up*100:.1f}% ≥ +15%（做空亏损方向），双腿平仓重开（校准新起点）",
+                         f"Price rose {dev_up*100:.1f}% >= +15% (short-loss direction), closing both legs and reopening (recalibrate baseline)",
                          sig["mark"], sig["funding_rate"], sig["premium_bps"], asdict(self.pos))
             self.decisions.append(d)
             return d
         return None
 
-    # ── 平仓后重开评估（TRIGGERED → HEDGED/FLAT）─
+    # ── Reopen evaluation after close (TRIGGERED -> HEDGED/FLAT) ─
     def _eval_reopen(self, market: str, sig: dict) -> Optional[Decision]:
-        """平仓后立即重开（MVP）：回到新入场价原点。v2：若 funding 已回落则不重开"""
+        """Reopen immediately after close (MVP): return to the new entry price baseline. v2: if funding has already fallen, do not reopen"""
         fr = sig["funding_rate"]
         if fr < self.p.funding_threshold or sig["premium_bps"] < self.p.premium_min_bps:
-            # 机会已消失 → 回空仓
+            # Opportunity has disappeared -> back to flat
             self.state = State.FLAT
             self.pos = None
             return Decision(sig["ts"], "NOOP", market,
-                            "触发平仓后机会消失（funding 回落），回空仓等待",
+                            "Opportunity disappeared after trigger close (funding fell), back to flat and wait",
                             sig["mark"], fr, sig["premium_bps"], None)
-        # 重开
+        # Reopen
         self.state = State.HEDGED
         self.pos = Position(
             market=market, entry_price=sig["mark"], entry_time=sig["ts"],
-            perp_size=self.p.perp_notional,   # 名义 = collateral × leverage
-            spot_size=self.p.spot_usd,        # 现货对冲
+            perp_size=self.p.perp_notional,   # notional = collateral x leverage
+            spot_size=self.p.spot_usd,        # spot hedge
             last_funding_rate=fr,
         )
         d = Decision(sig["ts"], "OPEN", market,
-                     f"偏离后重开（新基准 {sig['mark']}）", sig["mark"], fr,
+                     f"Reopen after deviation (new baseline {sig['mark']})", sig["mark"], fr,
                      sig["premium_bps"], asdict(self.pos))
         self.decisions.append(d)
         return d
 
-    # ── 状态查询 ────────────────────────────────
+    # ── State query ───────────────────────────
     def summary(self) -> dict:
         return {
             "state": self.state,

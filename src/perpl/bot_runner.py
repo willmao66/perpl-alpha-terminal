@@ -1,21 +1,21 @@
-"""Alpha Terminal Bot Runner（Phase 2 桥接层）—— 策略决策 → Perpl 真实执行 + Kuru 账本记账
+"""Alpha Terminal Bot Runner (Phase 2 bridge layer) - strategy decisions -> Perpl real execution + Kuru ledger
 
-老铁 2026-10-08 拍板（选项 A，Kuru 腿账本模拟）：
-- Perpl 永续腿：测试网**真实执行**（有 txid，真实链上活动证据）
-- Kuru 现货腿：**账本模拟**（delta 中性计算真实、下单逻辑真实、不下真实订单）
+Decided on 2026-10-08 (Option A, Kuru leg simulated in ledger):
+- Perpl perpetual leg: **real execution** on testnet (has txid, real on-chain activity evidence)
+- Kuru spot leg: **ledger simulation** (delta-neutral math is real, order logic is real, but no real orders placed)
 
-桥接流程（双轨）：
-    market-data WS（实时 funding + market-state）
-        ↓ 每帧
-    策略引擎（FundingArbStrategy，MON 低频持仓 funding arb）
-        ↓ 决策 OPEN / CLOSE
-    [OPEN]  Perpl open_short（测试网真实下单）→ 等成交确认 → Kuru ledger.open_spot（记账）
-    [CLOSE] Perpl close_short（测试网真实平仓）→ 等平仓确认 → Kuru ledger.close_spot（记账）
+Bridge flow (dual-track):
+    market-data WS (real-time funding + market-state)
+        | every frame
+    strategy engine (FundingArbStrategy, MON low-frequency hold funding arb)
+        | decision OPEN / CLOSE
+    [OPEN]  Perpl open_short (real testnet order) -> wait for fill confirmation -> Kuru ledger.open_spot (record)
+    [CLOSE] Perpl close_short (real testnet close) -> wait for close confirmation -> Kuru ledger.close_spot (record)
 
-用法：
-    python bot_runner.py                # 测试网真实执行（API key 在 config_local.py，gitignored）
-    python bot_runner.py --dry-run      # 纯模拟（不连 trading WS，本地验证桥接逻辑）
-    python bot_runner.py --market MON   # 指定市场（默认 MON）
+Usage:
+    python bot_runner.py                # real testnet execution (API key in config_local.py, gitignored)
+    python bot_runner.py --dry-run      # pure simulation (no trading WS, local verification of bridge logic)
+    python bot_runner.py --market MON   # specify market (default MON)
 """
 import argparse
 import asyncio
@@ -37,11 +37,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 log = logging.getLogger("perpl.bot")
 
 
-# ── 市场符号 ↔ ID ─────────────────────────────
+# ── Market symbol ↔ ID ─────────────────────────────
 def sym_to_mid(sym: str, network: str) -> int:
     src = MARKETS_MAINNET if network == "mainnet" else MARKETS_TESTNET
     if sym not in src:
-        raise ValueError(f"未知市场 {sym}（可用: {list(src.keys())}）")
+        raise ValueError(f"Unknown market {sym} (available: {list(src.keys())})")
     return src[sym]
 
 
@@ -54,7 +54,7 @@ def mid_to_sym(mid: int, network: str) -> str:
 
 
 class AlphaTerminalBot:
-    """桥接层：策略信号 → Perpl 真实执行 + Kuru 账本记账（双轨）"""
+    """Bridge layer: strategy signals -> Perpl real execution + Kuru ledger (dual-track)"""
 
     def __init__(self, params: StrategyParams, network: str = "testnet",
                  market: str = "MON", dry_run: bool = False,
@@ -71,31 +71,31 @@ class AlphaTerminalBot:
         self.strategy = FundingArbStrategy(params)
         self.ledger = KuruSpotLedger(spot_usd=params.spot_usd)
 
-        # 市场缩放（REST 拉取）
-        self.price_dec: int = 5     # MON 默认
+        # Market scaling (fetched via REST)
+        self.price_dec: int = 5     # MON default
         self.size_dec: int = 0
         self._load_market_config()
 
-        # 数据源 / 执行（lazy）
+        # Data sources / execution (lazy)
         self.market_ws: Optional[PerplWSClient] = None
-        self.trader = None          # PerplTradingClient（dry_run 时不建）
+        self.trader = None          # PerplTradingClient (not created in dry_run mode)
 
-        # 运行时状态
-        self._state: Optional[dict] = None    # 最新 market-state（scaled）
-        self._funding: Optional[dict] = None  # 最新 funding（scaled）
-        self._head: int = 0                   # trading WS 最新 head block
-        self._last_funding_block: Optional[int] = None  # 上次结算 block（at.b，检测真实结算事件）
+        # Runtime state
+        self._state: Optional[dict] = None    # latest market-state (scaled)
+        self._funding: Optional[dict] = None  # latest funding (scaled)
+        self._head: int = 0                   # latest head block of trading WS
+        self._last_funding_block: Optional[int] = None  # last settlement block (at.b, detects real settlement events)
         self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._ops_log = []                    # 操作流水（决策+订单+账本）
+        self._ops_log = []                    # operation log (decisions + orders + ledger)
         self._pending_confirm: Dict[int, asyncio.Event] = {}  # rq -> event
         self._order_state: Dict[int, dict] = {}               # rq -> {expect: open/close, market_id}
 
-    # ── 初始化 ────────────────────────────────
+    # ── Initialization ────────────────────────────
     def _load_market_config(self) -> None:
-        """从 REST /api/v1/pub/context 拉市场缩放参数"""
+        """Fetch market scaling params from REST /api/v1/pub/context"""
         import requests
         try:
-            # rest_base 已含 /api（如 https://testnet.perpl.xyz/api），直接拼 v1
+            # rest_base already includes /api (e.g. https://testnet.perpl.xyz/api), just append v1
             r = requests.get(f"{self.net['rest_base']}/v1/pub/context", timeout=15)
             d = r.json()
             for m in d.get("markets", []):
@@ -103,19 +103,19 @@ class AlphaTerminalBot:
                     cfg = m.get("config", {})
                     self.price_dec = cfg.get("price_decimals", 5)
                     self.size_dec = cfg.get("size_decimals", 0)
-                    log.info("市场 %s: price_dec=%s size_dec=%s", self.market,
+                    log.info("Market %s: price_dec=%s size_dec=%s", self.market,
                              self.price_dec, self.size_dec)
                     return
-            log.warning("REST 未找到市场 %s 配置，用默认 price_dec=5 size_dec=0", self.market)
+            log.warning("REST did not find config for market %s, using defaults price_dec=5 size_dec=0", self.market)
         except Exception as e:
-            log.warning("拉市场配置失败（用默认值）: %s", e)
+            log.warning("Failed to fetch market config (using defaults): %s", e)
 
     def _scale_price(self, raw: int) -> float:
         return raw / (10 ** self.price_dec)
 
-    # ── 启动 ──────────────────────────────────
+    # ── Startup ──────────────────────────────────
     async def start(self) -> None:
-        # 1) 连接 trading WS（真实执行模式）
+        # 1) Connect trading WS (real execution mode)
         if not self.dry_run:
             from config_local import PERPL_API_KEY, PERPL_API_KEY_SECRET, PERPL_CHAIN_ID, PERPL_WS
             from perpl_trader import PerplAuth, PerplTradingClient
@@ -125,43 +125,43 @@ class AlphaTerminalBot:
             await self.trader.connect()
             await self.trader._read_until_snapshots(timeout=15)
             self._head = self.trader.wallet.get("at", {}).get("b", 0)
-            log.info("trading WS 就绪: 账户=%s head=%s 持仓=%s",
+            log.info("trading WS ready: account=%s head=%s positions=%s",
                      self.trader._account_id, self._head, len(self.trader.positions))
-            # 恢复已有持仓 → 同步策略状态（崩溃恢复）
+            # Recover existing positions -> sync strategy state (crash recovery)
             await self._recover_positions()
         else:
-            log.info("dry-run 模式：不连 trading WS，Perpl 下单为模拟")
+            log.info("dry-run mode: no trading WS connection, Perpl orders are simulated")
 
-        # 2) 连接 market-data WS
+        # 2) Connect market-data WS
         cfg = CollectorConfig(network=self.network, markets=[self.market],
                               subscribe_orderbook=False, subscribe_trades=False,
                               subscribe_candles=False)
         self.market_ws = PerplWSClient(cfg, self._on_market_frame)
-        log.info("market-data WS 将连接: %s", self.market_ws.ws_url)
+        log.info("market-data WS will connect: %s", self.market_ws.ws_url)
 
     async def _recover_positions(self) -> None:
-        """重启恢复：若测试网已有持仓，同步策略状态为 HEDGED"""
+        """Restart recovery: if testnet already has positions, sync strategy state to HEDGED"""
         for mid, pos in self.trader.positions.items():
             s = pos.get("s", 0)
             if s > 0:
                 sym = mid_to_sym(int(mid), self.network)
                 ep_scaled = pos.get("ep", 0)
                 ep = self._scale_price(ep_scaled)
-                # 手动置策略为 HEDGED（用真实持仓信息）
+                # Manually set strategy to HEDGED (using real position info)
                 from strategy_engine import Position, State
                 self.strategy.state = State.HEDGED
                 self.strategy.pos = Position(
                     market=sym, entry_price=ep, entry_time=int(time.time() * 1000),
                     perp_size=self.p.perp_notional, spot_size=self.p.spot_usd,
                 )
-                # Kuru 账本同步
+                # Sync Kuru ledger
                 self.ledger.open_spot(sym, ep, int(time.time() * 1000),
                                       notional_usd=self.p.spot_usd)
-                log.info("恢复持仓: %s %s MON @ %s（策略置 HEDGED）", sym, s, ep)
+                log.info("Recovered position: %s %s MON @ %s (strategy set to HEDGED)", sym, s, ep)
 
-    # ── 数据流处理 ────────────────────────────
+    # ── Data stream handling ────────────────────────
     async def _on_market_frame(self, frame: dict) -> None:
-        """market-data WS 回调：更新缓存 + 喂策略 + 触发执行"""
+        """market-data WS callback: update cache + feed strategy + trigger execution"""
         mt = frame.get("mt")
         # 9 = MARKET_STATE_UPDATE, 10 = MARKET_FUNDING_UPDATE
         if mt == 9:
@@ -172,31 +172,31 @@ class AlphaTerminalBot:
             d = frame.get("d") or {}
             if str(self.market_id) in d:
                 f = d[str(self.market_id)]
-                # 真实结算检测：funding event block (at.b) 变化 = 新结算周期
+                # Real settlement detection: funding event block (at.b) change = new settlement period
                 fb = (f.get("at") or {}).get("b")
                 is_settle = False
                 if fb is not None:
                     if self._last_funding_block is None:
-                        # 首帧：记基准，不累计（避免把启动时的快照当结算）
+                        # First frame: record baseline, do not accumulate (avoid treating startup snapshot as settlement)
                         is_settle = False
                     elif fb != self._last_funding_block:
                         is_settle = True
                     self._last_funding_block = fb
                 self._funding = f
-                # state 齐了才喂（结算事件才 is_funding_event=True）
+                # Feed only when state is ready (is_funding_event=True only for settlement events)
                 if self._state is not None:
                     await self._process_signal(is_funding=is_settle)
                 return
         else:
             return
 
-        # state + funding 齐了才喂策略
+        # Feed strategy only when both state and funding are ready
         if self._state is None or self._funding is None:
             return
         await self._process_signal(is_funding=False)
 
     async def _process_signal(self, is_funding: bool) -> None:
-        """喂策略引擎，处理决策"""
+        """Feed the strategy engine and process the decision"""
         s = self._state
         f = self._funding
         mark = self._scale_price(s.get("mrk", 0))
@@ -204,30 +204,30 @@ class AlphaTerminalBot:
         rate_frac = (f.get("rate", 0) or 0) / 1_000_000
         ts = int(time.time() * 1000)
 
-        # Kuru 账本市价更新（浮盈）
+        # Kuru ledger mark price update (unrealized PnL)
         self.ledger.update_price(self.market, mark, ts)
 
         dec = self.strategy.update_market(self.market, rate_frac, oracle, mark, ts,
                                           is_funding_event=is_funding)
         if dec and dec.action in ("OPEN", "CLOSE"):
-            log.info("决策: %s | reason: %s", dec.action, dec.reason)
+            log.info("Decision: %s | reason: %s", dec.action, dec.reason)
             await self._execute(dec)
 
-    # ── 执行 ──────────────────────────────────
+    # ── Execution ──────────────────────────────
     async def _execute(self, dec) -> None:
-        """执行决策：Perpl 真实下单（dry-run 模拟）+ Kuru 账本记账"""
+        """Execute decision: Perpl real order (dry-run simulated) + Kuru ledger entry"""
         mark = dec.price
         if dec.action == "OPEN":
-            # size = 名义 / mark × 10^size_dec（scaled int，place_order 直接发链上）
-            # MON size_dec=0 → 整数 MON；ETH size_dec=3 → 0.001 ETH 粒度
+            # size = notional / mark x 10^size_dec (scaled int, sent on-chain directly by place_order)
+            # MON size_dec=0 -> integer MON; ETH size_dec=3 -> 0.001 ETH granularity
             size = max(1, round(self.p.perp_notional / mark * (10 ** self.size_dec)))
-            log.info(">>> [OPEN] %s 永续开空 %s %s @ %s (名义 %sU) 杠杆%sx | %s",
+            log.info(">>> [OPEN] %s perpetual short %s %s @ %s (notional %sU) leverage %sx | %s",
                      self.market, size, self.market, mark, self.p.perp_notional, self.p.leverage, dec.reason)
             if not self.dry_run:
                 lv = int(self.p.leverage * 100)
                 ok = await self._place_and_confirm(2, size, lv, expect="open")
                 if not ok:
-                    log.error("开仓未确认，跳过 Kuru 记账（保持一致性）")
+                    log.error("Open not confirmed, skipping Kuru ledger entry (keep consistency)")
                     return
             self.ledger.open_spot(self.market, mark, dec.ts, notional_usd=self.p.spot_usd)
             self._ops_log.append({"ts": dec.ts, "action": "OPEN", "market": self.market,
@@ -235,20 +235,20 @@ class AlphaTerminalBot:
                                   "reason": dec.reason, "dry_run": self.dry_run})
 
         elif dec.action == "CLOSE":
-            # 平当前真实持仓（从 trader.positions 拿 size）
+            # Close current real position (get size from trader.positions)
             size = 0
             if self.trader is not None:
                 pos = self.trader.positions.get(self.market_id, {})
                 size = pos.get("s", 0)
             if size <= 0:
-                log.warning(">>> [CLOSE] 无真实持仓可平，仅 Kuru 账本平仓 | %s", dec.reason)
+                log.warning(">>> [CLOSE] No real position to close, only Kuru ledger close | %s", dec.reason)
             else:
-                log.info(">>> [CLOSE] %s 永续平空 %s MON @ %s | %s", self.market, size, mark, dec.reason)
+                log.info(">>> [CLOSE] %s perpetual close short %s MON @ %s | %s", self.market, size, mark, dec.reason)
                 if not self.dry_run:
                     lv = int(self.p.leverage * 100)
                     ok = await self._place_and_confirm(4, size, lv, expect="close")
                     if not ok:
-                        log.error("平仓未确认，跳过 Kuru 记账")
+                        log.error("Close not confirmed, skipping Kuru ledger entry")
                         return
             self.ledger.close_spot(self.market, mark, dec.ts)
             self._ops_log.append({"ts": dec.ts, "action": "CLOSE", "market": self.market,
@@ -258,57 +258,57 @@ class AlphaTerminalBot:
 
     async def _place_and_confirm(self, order_type: int, size: int, lv: int,
                                  expect: str, timeout: float = 30.0) -> bool:
-        """下单 + 等确认（持仓更新 或 订单失败帧）
+        """Place order + wait for confirmation (position update or order failure frame)
 
-        成功 = 收到 PositionsUpdate 匹配市场
-        失败 = 收到 StatusResponse 错误 / OrdersUpdate st=7 (Failed) 携带拒绝原因
+        Success = received PositionsUpdate matching the market
+        Failure = received StatusResponse error / OrdersUpdate st=7 (Failed) with reject reason
         """
-        # 用最新 head 做 lb（+20 blocks 缓冲）
+        # Use latest head as lb (+20 blocks buffer)
         lb = self._head + 20
         await self.trader.place_order(self.market_id, order_type, size,
                                       leverage_hundredths=lv, last_block=lb)
-        # 等持仓更新事件
+        # Wait for position update event
         event = asyncio.Event()
         self._pending_confirm[self.market_id] = event
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            log.error("等待持仓确认超时 (%ss)——可能订单簿无对手方或订单滞留", timeout)
+            log.error("Timeout waiting for position confirmation (%ss) - order book may have no counterparty or the order is stuck", timeout)
             return False
         finally:
             self._pending_confirm.pop(self.market_id, None)
         return True
 
     async def _on_trading_frame(self, frame: dict) -> None:
-        """trading WS 帧：更新 head + 处理订单状态/持仓确认"""
+        """trading WS frame: update head + handle order status/position confirmation"""
         at = frame.get("at") or {}
         if at.get("b"):
             self._head = at["b"]
         mt = frame.get("mt")
-        # 3 = STATUS_RESPONSE：网关层校验结果（code!=0 即拒绝）
+        # 3 = STATUS_RESPONSE: gateway validation result (code!=0 means rejected)
         if mt == 3:
             st = frame.get("status") or {}
             code = st.get("code")
             if code != 0:
                 err = st.get("error", "unknown")
-                log.error("订单被网关拒绝: code=%s error=%s", code, err)
-                # 快速失败：触发确认事件（fail 由调用方超时处理）
-                # 注意：这里没有 rq 映射，只能唤醒所有等待者
+                log.error("Order rejected by gateway: code=%s error=%s", code, err)
+                # Fail fast: trigger confirmation events (failures handled by caller timeout)
+                # Note: no rq mapping here, wake up all waiters
                 for mid, ev in list(self._pending_confirm.items()):
                     ev.set()
-        # 24 = ORDERS_UPDATE：订单状态（st=7 Failed 带 sr 拒绝原因）
+        # 24 = ORDERS_UPDATE: order status (st=7 Failed with sr reject reason)
         elif mt == 24:
             d = frame.get("d")
             if isinstance(d, list):
                 for o in d:
                     if isinstance(o, dict) and o.get("st") == 7:
                         sr = o.get("sr")
-                        log.error("订单失败: sr=%s (reject reason)，mkt=%s size=%s",
+                        log.error("Order failed: sr=%s (reject reason), mkt=%s size=%s",
                                   sr, o.get("mkt"), o.get("s"))
                         mid = o.get("mkt")
                         if mid is not None and mid in self._pending_confirm:
                             self._pending_confirm[mid].set()
-        # 26/27 = POSITIONS_SNAPSHOT/UPDATE：持仓变化确认
+        # 26/27 = POSITIONS_SNAPSHOT/UPDATE: position change confirmation
         elif mt in (26, 27):
             d = frame.get("d")
             if isinstance(d, list):
@@ -316,11 +316,11 @@ class AlphaTerminalBot:
                     if isinstance(pos, dict) and pos.get("mkt") is not None:
                         mid = int(pos["mkt"])
                         if mid == self.market_id and mid in self._pending_confirm:
-                            log.info("持仓更新确认: mkt=%s size=%s st=%s sr=%s",
+                            log.info("Position update confirmed: mkt=%s size=%s st=%s sr=%s",
                                      mid, pos.get("s"), pos.get("st"), pos.get("sr"))
                             self._pending_confirm[mid].set()
 
-    # ── 日志 / 落盘 ───────────────────────────
+    # ── Logging / persistence ───────────────────────
     def _flush_ops(self) -> None:
         out = self.log_dir / f"bot_ops_{self._run_id}.jsonl"
         with open(out, "a", encoding="utf-8") as f:
@@ -342,41 +342,41 @@ class AlphaTerminalBot:
         }, ensure_ascii=False, indent=1), encoding="utf-8")
 
     async def _state_saver(self, interval: float = 60.0) -> None:
-        """定期保存状态（systemd 常驻时也能拿到最新 funding 累积）"""
+        """Periodically save state (so latest funding accumulation is available when running as a systemd daemon)"""
         while True:
             await asyncio.sleep(interval)
             try:
                 self._save_state()
-                log.debug("状态已定期保存 (funding_events=%s, collected=%s)",
+                log.debug("State periodically saved (funding_events=%s, collected=%s)",
                           self.strategy.pos.funding_events if self.strategy.pos else 0,
                           self.strategy.pos.funding_collected if self.strategy.pos else 0)
             except Exception as e:
-                log.error("定期保存状态失败: %s", e)
+                log.error("Failed to periodically save state: %s", e)
 
-    # ── 主循环 ────────────────────────────────
+    # ── Main loop ──────────────────────────────
     async def run(self) -> None:
-        """并行跑 market-data WS + trading WS 监听"""
+        """Run market-data WS + trading WS listeners in parallel"""
         await self.start()
         tasks = []
         tasks.append(asyncio.create_task(self.market_ws.run()))
         if self.trader is not None:
             tasks.append(asyncio.create_task(self._trading_listen()))
-        # 定期保存状态（systemd 常驻）
+        # Periodically save state (systemd daemon)
         tasks.append(asyncio.create_task(self._state_saver(interval=60.0)))
-        log.info("Bot 运行中（%s, market=%s, dry_run=%s）...", self.network, self.market, self.dry_run)
+        log.info("Bot running (%s, market=%s, dry_run=%s)...", self.network, self.market, self.dry_run)
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
-            log.info("Bot 停止")
+            log.info("Bot stopped")
             self._save_state()
 
     async def _trading_listen(self) -> None:
-        """监听 trading WS 帧（复用 PerplTradingClient.run 的循环逻辑）"""
+        """Listen to trading WS frames (reuse the loop logic from PerplTradingClient.run)"""
         try:
             async for raw in self.trader._ws:
                 frame = json.loads(raw)
                 await self._on_trading_frame(frame)
-                # 同步持仓到 client.positions（开平仓后真实持仓）
+                # Sync positions to client.positions (real positions after open/close)
                 mt = frame.get("mt")
                 if mt in (26, 27):
                     d = frame.get("d")
@@ -385,20 +385,20 @@ class AlphaTerminalBot:
                             if isinstance(pos, dict) and pos.get("mkt") is not None:
                                 self.trader.positions[int(pos["mkt"])] = pos
         except Exception as e:
-            log.error("trading 监听中断: %s", e)
+            log.error("Trading listener interrupted: %s", e)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Alpha Terminal Bot Runner（桥接层）")
+    parser = argparse.ArgumentParser(description="Alpha Terminal Bot Runner (bridge layer)")
     parser.add_argument("--market", type=str, default="MON")
     parser.add_argument("--network", type=str, default="testnet", choices=["testnet", "mainnet"])
-    parser.add_argument("--dry-run", action="store_true", help="纯模拟模式（不连 trading WS）")
+    parser.add_argument("--dry-run", action="store_true", help="pure simulation mode (no trading WS connection)")
     parser.add_argument("--config", type=str, default="config/strategy_test.json")
-    parser.add_argument("--timeout", type=int, default=0, help="运行秒数（0=无限）")
+    parser.add_argument("--timeout", type=int, default=0, help="run seconds (0=infinite)")
     args = parser.parse_args()
 
     params = StrategyParams.from_file(args.config)
-    log.info("参数: %sx 保证金=%sU 名义=%sU 现货=%sU",
+    log.info("Params: %sx collateral=%sU notional=%sU spot=%sU",
              params.leverage, params.collateral_usd, params.perp_notional, params.spot_usd)
 
     bot = AlphaTerminalBot(params, network=args.network, market=args.market,
@@ -406,7 +406,7 @@ def main():
 
     async def _main():
         await bot.start()
-        # 指定超时
+        # Specified timeout
         if args.timeout > 0:
             task = asyncio.create_task(bot.run())
             await asyncio.sleep(args.timeout)
@@ -416,14 +416,14 @@ def main():
             except asyncio.CancelledError:
                 pass
             bot._save_state()
-            log.info("运行 %ss 结束，状态已保存", args.timeout)
+            log.info("Run finished after %ss, state saved", args.timeout)
         else:
             await bot.run()
 
     try:
         asyncio.run(_main())
     except KeyboardInterrupt:
-        log.info("手动中断")
+        log.info("Manual interrupt")
         bot._save_state()
 
 

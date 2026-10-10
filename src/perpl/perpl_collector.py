@@ -1,13 +1,13 @@
-"""Perpl 数据采集器 - 时间胶囊雏形
+"""Perpl data collector - time capsule prototype
 
-第一期目标：持续采集 Perpl 市场数据并落盘（自用数据层）。
-- 数据源：Perpl 官方 WS（免认证 market-data）
-- 落盘：JSONL，按天分目录，按流类型分文件
-- 增值：每条消息附加 `_recv_ts`（本地接收时间戳，官方数据没有的维度）
+Phase 1 goal: continuously collect Perpl market data and persist it (self-use data layer).
+- Data source: Perpl official WS (unauthenticated market-data)
+- Persistence: JSONL, per-day directories, per-stream-type files
+- Added value: every message gets a `_recv_ts` (local receive timestamp, a dimension official data does not have)
 
-用法：
-    python perpl_collector.py            # mainnet 默认
-    python perpl_collector.py --testnet  # 测试网
+Usage:
+    python perpl_collector.py            # mainnet default
+    python perpl_collector.py --testnet  # testnet
     python perpl_collector.py --markets BTC,ETH
 """
 import argparse
@@ -31,28 +31,28 @@ log = logging.getLogger("perpl.collector")
 
 
 class PerplCollector:
-    """采集主循环：收帧 -> 打时间戳 -> 落盘 JSONL"""
+    """Collection main loop: receive frame -> timestamp -> persist JSONL"""
 
     def __init__(self, config: CollectorConfig):
         self.cfg = config
         self.data_root = Path(config.data_dir)
         self.data_root.mkdir(parents=True, exist_ok=True)
-        # 当前打开的写入句柄: (日期, 流类型, 市场) -> file
+        # Currently open write handles: (date, stream type, market) -> file
         self._handles: Dict[tuple, object] = {}
         self._stats: Dict[str, int] = {}
         self._start = time.time()
 
-    # ── 文件管理 ──────────────────────────────
+    # ── File management ───────────────────────
     def _file_for(self, stream: str, frame: dict) -> Optional[object]:
-        """按 (日期, 流类型, 市场) 决定落盘文件"""
+        """Decide the persistence file by (date, stream type, market)"""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         mt = frame.get("mt")
-        # 从 sid 映射反查 stream（订阅时已存）
+        # Reverse-lookup the stream from sid (saved at subscription time)
         sid = frame.get("sid")
         if sid is not None:
             stream = self._sid_map.get(sid, stream)
 
-        # 分类：market-state / funding 是 chain 级，其余 market 级
+        # Classification: market-state / funding are chain-level, the rest are market-level
         if mt == MT["MARKET_STATE_UPDATE"]:
             key, fname = ("market_state",), "market_state.jsonl"
         elif mt == MT["MARKET_FUNDING_UPDATE"]:
@@ -78,11 +78,11 @@ class PerplCollector:
         return self._handles[handle_key]
 
     def _market_from_sid(self, sid: Optional[int]) -> str:
-        """sid -> 市场符号（反查订阅流名 order-book@1 -> BTC）"""
+        """sid -> market symbol (reverse-lookup the subscribed stream name order-book@1 -> BTC)"""
         if sid is None:
             return "?"
         stream = self._sid_map.get(sid, "")
-        # stream 形如 order-book@1 或 candles@1*60
+        # stream looks like order-book@1 or candles@1*60
         try:
             mkt_id = int(stream.split("@")[1].split("*")[0])
         except (IndexError, ValueError):
@@ -90,24 +90,24 @@ class PerplCollector:
         inv = {v: k for k, v in self.cfg.market_ids().items()}
         return inv.get(mkt_id, f"m{mkt_id}")
 
-    # ── 消息处理 ──────────────────────────────
+    # ── Message handling ──────────────────────
     async def on_message(self, frame: dict) -> None:
         f = self._file_for("", frame)
         if f is None:
             return
-        # 附加本地接收时间戳（时间胶囊核心增值）
+        # Attach the local receive timestamp (the time capsule core added value)
         record = {"_recv_ts": int(time.time() * 1000), **frame}
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         f.flush()
         mt = frame.get("mt")
         self._stats[mt] = self._stats.get(mt, 0) + 1
 
-    # ── 主循环 ────────────────────────────────
+    # ── Main loop ─────────────────────────────
     async def run(self) -> None:
         client = PerplWSClient(self.cfg, self.on_message)
-        # 暴露 sid_map 给 collector 反查
+        # Expose sid_map to the collector for reverse lookup
         self._sid_map = client._sid_map
-        log.info("采集启动 | 网络=%s 市场=%s 落盘=%s",
+        log.info("Collection started | network=%s markets=%s persist=%s",
                  self.cfg.network, list(self.cfg.market_ids().keys()), self.data_root)
         stats_task = asyncio.create_task(self._stats_reporter())
         try:
@@ -117,13 +117,13 @@ class PerplCollector:
             self._close_all()
 
     async def _stats_reporter(self) -> None:
-        """每 60s 打一次统计"""
+        """Log stats every 60s"""
         while True:
             await asyncio.sleep(60)
             elapsed = time.time() - self._start
             total = sum(self._stats.values())
             rate = total / elapsed if elapsed > 0 else 0
-            log.info("统计 | 总消息=%d 速率=%.1f msg/s | %s",
+            log.info("Stats | total_msgs=%d rate=%.1f msg/s | %s",
                      total, rate, {MT_REV.get(k, k): v for k, v in sorted(self._stats.items())})
 
     def _close_all(self) -> None:
@@ -136,13 +136,13 @@ MT_REV = {v: k for k, v in MT.items()}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Perpl 数据采集器")
-    parser.add_argument("--testnet", action="store_true", help="使用测试网")
-    parser.add_argument("--markets", type=str, default="", help="市场列表，逗号分隔，如 BTC,ETH")
-    parser.add_argument("--data-dir", type=str, default="data", help="落盘目录")
-    parser.add_argument("--no-orderbook", action="store_true", help="不订阅订单簿")
-    parser.add_argument("--no-trades", action="store_true", help="不订阅成交")
-    parser.add_argument("--no-candles", action="store_true", help="不订阅K线")
+    parser = argparse.ArgumentParser(description="Perpl data collector")
+    parser.add_argument("--testnet", action="store_true", help="use testnet")
+    parser.add_argument("--markets", type=str, default="", help="market list, comma-separated, e.g. BTC,ETH")
+    parser.add_argument("--data-dir", type=str, default="data", help="persistence directory")
+    parser.add_argument("--no-orderbook", action="store_true", help="do not subscribe to order book")
+    parser.add_argument("--no-trades", action="store_true", help="do not subscribe to trades")
+    parser.add_argument("--no-candles", action="store_true", help="do not subscribe to candles")
     args = parser.parse_args()
 
     cfg = CollectorConfig(
@@ -157,7 +157,7 @@ def main():
     try:
         asyncio.run(collector.run())
     except KeyboardInterrupt:
-        log.info("手动停止")
+        log.info("Manual stop")
 
 
 if __name__ == "__main__":

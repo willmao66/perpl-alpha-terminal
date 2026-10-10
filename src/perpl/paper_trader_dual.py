@@ -1,13 +1,13 @@
-"""双腿模拟盘（Dual-leg Paper Trading）：策略决策 → Perpl 永续腿 + Kuru 现货腿账本
+"""Dual-leg paper trading: strategy decisions -> Perpl perpetual leg + Kuru spot leg ledger
 
-老铁 2026-10-08 拍板（选项 A）：
-- Perpl 永续腿：测试网真实执行（本脚本 = 模拟层，验证决策与账本联动）
-- Kuru 现货腿：账本模拟（delta 中性计算真实、下单逻辑真实、不下真实订单）
-- 目的：验证"策略信号 → 双腿联动 → 账本记录"闭环，供后续接真实执行层
+Decided on 2026-10-08 (Option A):
+- Perpl perpetual leg: real testnet execution (this script = simulation layer, verifying decision + ledger linkage)
+- Kuru spot leg: ledger simulation (delta-neutral math is real, order logic is real, but no real orders placed)
+- Purpose: verify the "strategy signal -> dual-leg linkage -> ledger record" closed loop, for later connection to the real execution layer
 
-用法：
+Usage:
     python paper_trader_dual.py --date 2026-10-07
-    python paper_trader_dual.py                    # 默认最新一天
+    python paper_trader_dual.py                    # default to the latest day
 """
 import argparse
 import json
@@ -26,7 +26,7 @@ log = logging.getLogger("perpl.paper_dual")
 
 
 def load_day_data(data_dir: str, day: str):
-    """加载某天 funding + market_state 数据（按时间排序的事件流）"""
+    """Load one day's funding + market_state data (event stream sorted by time)"""
     day_dir = Path(data_dir) / day
     events = []
     if (day_dir / "funding.jsonl").exists():
@@ -54,7 +54,7 @@ def load_day_data(data_dir: str, day: str):
 def run_dual(data_dir: str, day: str, params: StrategyParams):
     events = load_day_data(data_dir, day)
     if not events:
-        log.error("没有数据: %s/%s", data_dir, day)
+        log.error("No data: %s/%s", data_dir, day)
         return
 
     id2sym = {v: k for k, v in MARKETS_MAINNET.items()}
@@ -64,7 +64,7 @@ def run_dual(data_dir: str, day: str, params: StrategyParams):
     funding_cache = {}
 
     decisions = []
-    ledger_ops = []       # Kuru 账本操作流水（供演示）
+    ledger_ops = []       # Kuru ledger operation log (for demonstration)
 
     for ts, kind, mid, data in events:
         sym = id2sym.get(int(mid), f"m{mid}")
@@ -87,14 +87,14 @@ def run_dual(data_dir: str, day: str, params: StrategyParams):
             rate_frac = rate / 1_000_000 if rate else 0.0
             is_funding = (kind == "funding")
 
-            # 每帧先更新 Kuru 账本市价（浮盈计算）
+            # Update the Kuru ledger mark price on every frame (unrealized PnL computation)
             if mark:
                 ledger.update_price(sym, mark, ts)
 
             d = st.update_market(sym, rate_frac, oracle, mark, ts, is_funding_event=is_funding)
             if d:
                 decisions.append(asdict_safe(d))
-                # 决策 → Kuru 账本联动
+                # Decision -> Kuru ledger linkage
                 if d.action == "OPEN":
                     entry = ledger.open_spot(sym, d.price, d.ts, notional_usd=params.spot_usd)
                     ledger_ops.append({"ts": d.ts, "market": sym, "action": "OPEN",
@@ -107,31 +107,31 @@ def run_dual(data_dir: str, day: str, params: StrategyParams):
                                            "price": d.price, "notional": entry.notional_usd,
                                            "amount": entry.amount})
 
-    # ── 汇总 ──────────────────────────────
+    # ── Summary ──────────────────────────────
     print(f"\n{'='*70}")
-    print(f"双腿模拟盘 | 数据: {day} | 事件数: {len(events)} | 参数: {params.leverage}x {params.collateral_usd}U 名义{params.perp_notional}U 现货{params.spot_usd}U")
+    print(f"Dual-leg paper trading | data: {day} | events: {len(events)} | params: {params.leverage}x {params.collateral_usd}U notional {params.perp_notional}U spot {params.spot_usd}U")
     print(f"{'='*70}")
     for sym, st in strategies.items():
         s = st.summary()
         pos = s.get("position")
         ls = ledgers[sym].snapshot(sym)
-        print(f"\n[{sym}] 策略状态={s['state']} 决策数={s['decision_count']} | Kuru账本={ls['status']} "
-              f"持仓{ls['amount']:.0f} MON 已实现{ls['realized_pnl']:.2f}U 浮盈{ls['unrealized_pnl']:.2f}U")
+        print(f"\n[{sym}] strategy_state={s['state']} decisions={s['decision_count']} | Kuru_ledger={ls['status']} "
+              f"position {ls['amount']:.0f} MON realized {ls['realized_pnl']:.2f}U unrealized {ls['unrealized_pnl']:.2f}U")
         if pos:
-            print(f"  永续: 入场价={pos['entry_price']} funding事件={pos['funding_events']} "
-                  f"累计funding={pos['funding_collected']:.2f}")
+            print(f"  Perpetual: entry_price={pos['entry_price']} funding_events={pos['funding_events']} "
+                  f"cumulative_funding={pos['funding_collected']:.2f}")
         mkt_decisions = [d for d in decisions if d["market"] == sym]
-        for d in mkt_decisions[-3:]:  # 最近 3 条
+        for d in mkt_decisions[-3:]:  # latest 3
             print(f"  {fmt_time(d['ts'])} [{d['action']}] {d['reason'][:60]}")
 
-    # Kuru 账本总览
+    # Kuru ledger overview
     print(f"\n{'─'*70}")
-    print("Kuru 现货腿账本总览（模拟）:")
+    print("Kuru spot leg ledger overview (simulated):")
     for sym, ledger in ledgers.items():
         summ = ledger.summary()
-        print(f"  [{sym}] 已实现 {summ['total_realized_pnl']:.4f}U | 浮动 {summ['total_unrealized_pnl']:.4f}U")
+        print(f"  [{sym}] realized {summ['total_realized_pnl']:.4f}U | unrealized {summ['total_unrealized_pnl']:.4f}U")
 
-    # 保存输出
+    # Save output
     out = Path(data_dir) / f"paper_dual_{day}.json"
     out.write_text(json.dumps({
         "params": params.__dict__,
@@ -139,7 +139,7 @@ def run_dual(data_dir: str, day: str, params: StrategyParams):
         "kuru_ledger_ops": ledger_ops,
         "kuru_ledger_summary": {sym: ledgers[sym].summary() for sym in ledgers},
     }, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"\n双腿模拟盘记录已保存: {out}")
+    print(f"\nDual-leg paper trading records saved: {out}")
 
 
 def asdict_safe(d):
@@ -155,8 +155,8 @@ def fmt_time(ts_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="双腿模拟盘：策略 + Kuru 账本")
-    parser.add_argument("--date", type=str, default="", help="日期 YYYY-MM-DD（默认最新）")
+    parser = argparse.ArgumentParser(description="Dual-leg paper trading: strategy + Kuru ledger")
+    parser.add_argument("--date", type=str, default="", help="date YYYY-MM-DD (default latest)")
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--config", type=str, default="config/strategy_test.json")
     args = parser.parse_args()
@@ -164,13 +164,13 @@ def main():
     if not args.date:
         days = sorted([p.name for p in Path(args.data_dir).iterdir() if p.is_dir()])
         if not days:
-            log.error("data 目录没有数据")
+            log.error("data directory has no data")
             return
         args.date = days[-1]
 
     params = StrategyParams.from_file(args.config)
-    print(f"参数: 杠杆={params.leverage}x 保证金={params.collateral_usd}U "
-          f"名义={params.perp_notional}U 现货={params.spot_usd}U")
+    print(f"Params: leverage={params.leverage}x collateral={params.collateral_usd}U "
+          f"notional={params.perp_notional}U spot={params.spot_usd}U")
     run_dual(args.data_dir, args.date, params)
 
 

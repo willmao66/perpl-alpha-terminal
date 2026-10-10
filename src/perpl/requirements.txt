@@ -1,7 +1,7 @@
-# Perpl 数据采集器依赖
+# Perpl data collector dependencies
 websockets>=12.0
 requests>=2.31
-# Ed25519 签名（Perpl trading WS 认证）
+# Ed25519 signing (Perpl trading WS authentication)
 cryptography>=42.0
-# 可选：Kuru 链上探测（web3）
+# Optional: Kuru on-chain probing (web3)
 # web3>=7.0

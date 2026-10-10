@@ -1,11 +1,11 @@
-"""Perpl Alpha Terminal - 配置模块
+"""Perpl Alpha Terminal - configuration module
 
-来源：docs.perpl.xyz（2026-09-24 拉取确认）
+Source: docs.perpl.xyz (fetched and confirmed 2026-09-24)
 """
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-# ── 网络参数（官方文档确认）──────────────────────────────
+# ── Network params (confirmed from official docs) ──────────
 MAINNET = {
     "chain_id": 143,
     "rest_base": "https://app.perpl.xyz/api",
@@ -24,7 +24,7 @@ TESTNET = {
     "ausd_token": "0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC",
 }
 
-# ── 市场 ID（mainnet，官方文档确认）──────────────────────
+# ── Market IDs (mainnet, confirmed from official docs) ─────
 MARKETS_MAINNET: Dict[str, int] = {
     "BTC": 1,
     "MON": 10,
@@ -42,10 +42,10 @@ MARKETS_TESTNET: Dict[str, int] = {
     "ZEC": 256,
 }
 
-# ── 蜡烛分辨率（秒）────────────────────────────────────
+# ── Candle resolution (seconds) ───────────────────────
 CANDLE_RESOLUTIONS = [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400]
 
-# ── WS 消息类型（官方文档确认）──────────────────────────
+# ── WS message types (confirmed from official docs) ───
 MT = {
     "PING": 1,
     "PONG": 2,
@@ -65,24 +65,24 @@ MT = {
     "HEARTBEAT": 100,
 }
 
-# ── WS 限流（官方文档）──────────────────────────────────
+# ── WS rate limits (from official docs) ───────────────
 WS_MAX_MSGS_PER_SEC = 50      # ~50 msg/s per connection
 WS_MAX_CONNS_PER_IP = 5       # ~5 connections per IP
 
 
 @dataclass
 class CollectorConfig:
-    """采集器配置"""
+    """Collector configuration"""
     network: str = "mainnet"                     # mainnet / testnet
     markets: List[str] = field(default_factory=lambda: ["BTC", "MON", "ETH", "SOL", "HYPE", "ZEC"])
-    subscribe_orderbook: bool = True             # 订单簿
-    subscribe_trades: bool = True                # 成交
-    subscribe_candles: bool = True               # K线
+    subscribe_orderbook: bool = True             # order book
+    subscribe_trades: bool = True                # trades
+    subscribe_candles: bool = True               # candles
     candle_resolution: int = 60                  # 1m
-    data_dir: str = "data"                       # 落盘目录
-    heartbeat_timeout: int = 30                  # 心跳超时秒
-    auto_reconnect: bool = True                  # 自动重连
-    reconnect_delay: int = 5                     # 重连等待秒
+    data_dir: str = "data"                       # persistence directory
+    heartbeat_timeout: int = 30                  # heartbeat timeout seconds
+    auto_reconnect: bool = True                  # auto reconnect
+    reconnect_delay: int = 5                     # reconnect wait seconds
 
     def net(self) -> dict:
         return MAINNET if self.network == "mainnet" else TESTNET

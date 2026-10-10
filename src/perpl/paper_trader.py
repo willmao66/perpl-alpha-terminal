@@ -1,12 +1,12 @@
-"""模拟盘（Paper Trading）：用采集器真实数据回放驱动策略引擎
+"""Paper trading: replay real collector data to drive the strategy engine
 
-- 输入：采集器落盘的 funding.jsonl + market_state.jsonl（真实数据）
-- 流程：按时间回放 → 喂策略引擎 → 收集决策记录
-- 输出：控制台摘要 + JSON 决策记录（供演示/后续接真实执行）
+- Input: funding.jsonl + market_state.jsonl persisted by the collector (real data)
+- Flow: replay by time -> feed the strategy engine -> collect decision records
+- Output: console summary + JSON decision records (for demo / later connection to real execution)
 
-用法：
-    python paper_trader.py                    # 用 data/ 最新一天数据
-    python paper_trader.py --date 2026-10-07  # 指定日期
+Usage:
+    python paper_trader.py                    # use the latest day's data in data/
+    python paper_trader.py --date 2026-10-07  # specify a date
 """
 import argparse
 import asyncio
@@ -26,7 +26,7 @@ log = logging.getLogger("perpl.paper")
 
 
 def load_day_data(data_dir: str, day: str, markets: dict):
-    """加载某天的 funding + market_state 数据（按时间排序的事件流）"""
+    """Load one day's funding + market_state data (event stream sorted by time)"""
     day_dir = Path(data_dir) / day
     events = []
     if (day_dir / "funding.jsonl").exists():
@@ -54,12 +54,12 @@ def load_day_data(data_dir: str, day: str, markets: dict):
 def run_paper(data_dir: str, day: str, params: StrategyParams):
     events = load_day_data(data_dir, day, MARKETS_MAINNET)
     if not events:
-        log.error("没有数据: %s/%s （先跑采集器）", data_dir, day)
+        log.error("No data: %s/%s (run the collector first)", data_dir, day)
         return
 
-    # 市场 id -> 符号
+    # market id -> symbol
     id2sym = {v: k for k, v in MARKETS_MAINNET.items()}
-    # 每市场一个策略实例（模拟多市场独立决策；真实版按资金分配）
+    # One strategy instance per market (simulate independent multi-market decisions; real version allocates by capital)
     strategies = {}
     state_cache = {}    # mid -> latest state
     funding_cache = {}  # mid -> latest funding
@@ -74,7 +74,7 @@ def run_paper(data_dir: str, day: str, params: StrategyParams):
         elif kind == "funding":
             funding_cache[mid] = data
 
-        # 该市场 state 和 funding 都齐了才喂策略
+        # Only feed the strategy once both state and funding are ready for that market
         if mid in state_cache and mid in funding_cache:
             s = state_cache[mid]
             f = funding_cache[mid]
@@ -84,34 +84,34 @@ def run_paper(data_dir: str, day: str, params: StrategyParams):
             rate = f.get("rate", 0)
             oracle = s.get("orl", 0)
             mark = s.get("mrk", 0)
-            # rate 单位推断 Micros：除以 1e6 得小数费率
+            # rate unit inferred as Micros: divide by 1e6 to get decimal rate
             rate_frac = rate / 1_000_000 if rate else 0.0
-            # funding 事件（funding 帧到达）才算结算；state 帧只更新价格
+            # Only funding events (funding frame arrival) count as settlement; state frames only update price
             is_funding = (kind == "funding")
             d = st.update_market(sym, rate_frac, oracle, mark, ts, is_funding_event=is_funding)
             if d:
                 decisions.append(asdict_safe(d))
 
-    # ── 汇总 ──────────────────────────────
+    # ── Summary ──────────────────────────────
     print(f"\n{'='*60}")
-    print(f"模拟盘结果 | 数据: {day} | 事件数: {len(events)}")
+    print(f"Paper trading results | data: {day} | events: {len(events)}")
     print(f"{'='*60}")
     for sym, st in strategies.items():
         s = st.summary()
         pos = s.get("position")
-        print(f"\n[{sym}] 状态={s['state']} 决策数={s['decision_count']}")
+        print(f"\n[{sym}] state={s['state']} decisions={s['decision_count']}")
         if pos:
-            print(f"  持仓: 入场价={pos['entry_price']} funding事件={pos['funding_events']} "
-                  f"累计funding={pos['funding_collected']:.2f}")
-        # 该市场的决策
+            print(f"  Position: entry_price={pos['entry_price']} funding_events={pos['funding_events']} "
+                  f"cumulative_funding={pos['funding_collected']:.2f}")
+        # This market's decisions
         mkt_decisions = [d for d in decisions if d["market"] == sym]
         for d in mkt_decisions:
             print(f"  {fmt_time(d['ts'])} [{d['action']}] {d['reason'][:60]}")
 
-    # 保存决策记录
+    # Save decision records
     out = Path(data_dir) / f"paper_decisions_{day}.json"
     out.write_text(json.dumps(decisions, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"\n决策记录已保存: {out} (共 {len(decisions)} 条)")
+    print(f"\nDecision records saved: {out} ({len(decisions)} total)")
 
 
 def asdict_safe(d):
@@ -127,17 +127,17 @@ def fmt_time(ts_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="模拟盘：真实数据回放")
-    parser.add_argument("--date", type=str, default="", help="日期 YYYY-MM-DD（默认取最新）")
+    parser = argparse.ArgumentParser(description="Paper trading: real data replay")
+    parser.add_argument("--date", type=str, default="", help="date YYYY-MM-DD (default latest)")
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--capital", type=float, default=10000.0)
     args = parser.parse_args()
 
-    # 找最新有数据的日期
+    # Find the most recent day with data
     if not args.date:
         days = sorted([p.name for p in Path(args.data_dir).iterdir() if p.is_dir()])
         if not days:
-            log.error("data 目录没有数据")
+            log.error("data directory has no data")
             return
         args.date = days[-1]
 
