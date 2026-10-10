@@ -4,7 +4,7 @@
 
 Built for [Monad Metropolis Hackathon 2026](https://monad.xyz/metropolis) · Track: **Onchain Finance & Trading** · Bounties: **Perpl API · Perpl Analytics** (+ Agora, Kuru×2, Nansen, MetaMask)
 
-> **Live product**: a bot is running 24/7 on a VPS against the **Perpl testnet**, placing real on-chain orders (verifiable txids) and collecting funding. See [Deployment](#deployment).
+> **Live product**: a bot is running 24/7 on a VPS against the **Perpl testnet**, placing real on-chain orders (verifiable txids) and collecting funding. See [Deployment](#deployment) and the **[live run report](docs/run-report-2026-10-09-1010.md)** (16.4h unattended run, 23 funding settlements).
 
 ---
 
@@ -99,6 +99,27 @@ journalctl -u perpl-alpha-terminal -f   # watch it trade
 
 On startup the bot detects existing positions and resumes (no duplicate opens). WS auto-reconnects; systemd restarts on crash.
 
+The service now runs the **multi-market rotation** bot (`bot_runner_multi.py`): it scans all candidate markets, opens the one with the best funding+premium score, holds while funding is healthy, and auto-rotates when a risk exit fires (funding < 5 micro / turns negative / +15% price deviation).
+
+---
+
+## Live Run Results
+
+**16.4-hour unattended run** (2026-10-09 19:09 → 2026-10-10 11:36, Perpl testnet) — full report: [docs/run-report-2026-10-09-1010.md](docs/run-report-2026-10-09-1010.md)
+
+| Metric | Value |
+|--------|-------|
+| Runtime (no restart) | 16.4 hours |
+| Markets scanned | 15 |
+| Auto-selected market | **ZEC** (only deep-premium venue; all others had funding ≤ 0) |
+| Position | Short 16 ZEC @ 1221.999 (20U notional, 4x) |
+| Funding settlements | **23** (~43 min cadence) |
+| Funding collected | **+0.0122 USDC** |
+| Risk exits | 0 (rate held at 30 micro, above the 5-micro exit threshold) |
+| Implied annualized yield (holding-period) | ≈ **32.6%** |
+
+This demonstrates the complete unattended loop: **auto-scan → auto-select → real on-chain order → funding collection → risk monitoring → auto-rotate**. On-chain position confirmed (sr=21), no crashes, no manual intervention.
+
 ---
 
 ## Repository Layout
@@ -111,12 +132,14 @@ src/perpl/
 ├─ strategy_engine.py     # Funding arb signal engine + state machine
 ├─ kuru_ledger.py         # Kuru spot leg (ledger simulation, delta-neutral)
 ├─ bot_runner.py          # AlphaTerminalBot — data → strategy → execution bridge
+├─ bot_runner_multi.py    # Multi-market rotation bot (FLAT scan → open best → risk exit → rotate)
 ├─ paper_trader.py        # Single-leg paper backtest
 ├─ paper_trader_dual.py   # Dual-leg paper backtest (perp + spot ledger)
 ├─ perpl_trader.py        # Perpl trading WS client (Ed25519 auth, order placement)
 ├─ config/                # Strategy params (JSON-driven, not hardcoded)
 │  ├─ strategy_test.json  #   test scenario: 1000U / 4x / 4000U notional
-│  └─ bridge_test.json    #   VPS live: 5U / 4x (testnet thin book)
+│  ├─ bridge_test.json    #   VPS live: 5U / 4x (testnet thin book)
+│  └─ vps_eth.json        #   VPS multi-market: 5U / 4x / 5micro exit
 └─ requirements.txt
 ```
 
