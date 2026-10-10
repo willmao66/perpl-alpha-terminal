@@ -1,4 +1,4 @@
-"""拉测试网 MON/BTC/ETH 市场参数"""
+"""Pull testnet MON/BTC/ETH market parameters"""
 import requests
 
 r = requests.get("https://testnet.perpl.xyz/api/v1/pub/context", timeout=15)

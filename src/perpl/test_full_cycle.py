@@ -1,12 +1,12 @@
-"""测试网完整验证：开空 MON → 确认持仓 → 平空 → 确认清仓
+"""Full testnet verification: open short MON -> confirm position -> close short -> confirm flatten
 
-验证全流程（One-Click Trading 开启后）：
-1. 连接 trading WS + sign-in
-2. 拉 MON 价格 + head
-3. 开空 10 MON (3x)
-4. 等成交 + 确认持仓
-5. 平仓
-6. 确认清仓
+Verify the full flow (after One-Click Trading is enabled):
+1. Connect trading WS + sign-in
+2. Pull MON price + head
+3. Open short 10 MON (3x)
+4. Wait for fill + confirm position
+5. Close position
+6. Confirm flatten
 """
 import asyncio
 import json
@@ -36,10 +36,10 @@ async def get_mon_price():
 
 
 async def main():
-    print("=== 测试网完整验证：开空 → 持仓 → 平仓 ===")
+    print("=== Full testnet verification: open short -> position -> close ===")
     st = await get_mon_price()
     if not st:
-        print("❌ 拿不到 MON 价格")
+        print("❌ Cannot get MON price")
         return
     print(f"MON mark: {st.get('mrk')} = {st.get('mrk')/1e5:.5f}")
 
@@ -48,15 +48,15 @@ async def main():
     await client.connect()
     await client._read_until_snapshots(timeout=10)
     head = client.wallet.get("at", {}).get("b", 0)
-    print(f"账户: {client._account_id} head: {head}")
+    print(f"Account: {client._account_id} head: {head}")
 
-    # ── 开空 ──
+    # ── Open short ──
     size = 10
     lb = head + 20
-    print(f"\n>>> 开空 {size} MON (3x)")
+    print(f"\n>>> Open short {size} MON (3x)")
     await client.place_order(MON_MARKET, 2, size, leverage_hundredths=300, last_block=lb)
 
-    # 监听直到持仓出现
+    # Listen until a position appears
     pos_seen = False
     for i in range(20):
         try:
@@ -67,15 +67,15 @@ async def main():
                 d = fr.get("d", [])
                 for p in d if isinstance(d, list) else []:
                     if p.get("mkt") == MON_MARKET and p.get("s", 0) > 0:
-                        print(f"  ✅ 持仓开立: size={p['s']} ep={p.get('ep')} sd={p.get('sd')} st={p.get('st')} sr={p.get('sr')}")
+                        print(f"  ✅ Position opened: size={p['s']} ep={p.get('ep')} sd={p.get('sd')} st={p.get('st')} sr={p.get('sr')}")
                         pos_seen = True
         except asyncio.TimeoutError:
             break
     if not pos_seen:
-        print("  ⚠️ 未检测到持仓")
+        print("  ⚠️ No position detected")
 
-    # ── 平仓 ──
-    print(f"\n>>> 平仓 {size} MON")
+    # ── Close position ──
+    print(f"\n>>> Close {size} MON")
     await client.place_order(MON_MARKET, 4, size, leverage_hundredths=300, last_block=lb + 100)
 
     closed = False
@@ -88,15 +88,15 @@ async def main():
                 d = fr.get("d", [])
                 for p in d if isinstance(d, list) else []:
                     if p.get("mkt") == MON_MARKET and p.get("s", 0) == 0:
-                        print(f"  ✅ 仓位已平: st={p.get('st')} sr={p.get('sr')}")
+                        print(f"  ✅ Position closed: st={p.get('st')} sr={p.get('sr')}")
                         closed = True
         except asyncio.TimeoutError:
             break
     if not closed:
-        print("  ⚠️ 未确认平仓（可能已平但没捕捉到）")
+        print("  ⚠️ Close not confirmed (may already be closed but not captured)")
 
     await client.close()
-    print("\n✅ 完整验证结束")
+    print("\n✅ Full verification complete")
 
 
 asyncio.run(main())

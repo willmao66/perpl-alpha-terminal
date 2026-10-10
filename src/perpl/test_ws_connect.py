@@ -1,4 +1,4 @@
-"""快速连通性测试：连 Perpl WS 收 8 秒数据，打印帧类型统计 + 各类型样例"""
+"""Quick connectivity test: connect to Perpl WS for 8 seconds, print frame-type stats + a sample of each type"""
 import asyncio
 import json
 import sys
@@ -31,11 +31,11 @@ async def test():
     await client.stop()
     task.cancel()
 
-    print(f"\n=== 8 秒内收到 {sum(counts.values())} 帧 ===")
+    print(f"\n=== Received {sum(counts.values())} frames in 8 seconds ===")
     for mt, n in sorted(counts.items()):
         name = MT_REV.get(mt, f"mt{mt}")
         print(f"  {name:<28} x{n}")
-    print("\n=== 样例 ===")
+    print("\n=== Samples ===")
     for mt, frame in samples.items():
         name = MT_REV.get(mt, f"mt{mt}")
         preview = json.dumps(frame, ensure_ascii=False)

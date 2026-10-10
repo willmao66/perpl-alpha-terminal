@@ -1,4 +1,4 @@
-"""查 API key 信息和 scope（read/trade）"""
+"""Query API key info and scope (read/trade)"""
 import json
 import sys
 import urllib.request

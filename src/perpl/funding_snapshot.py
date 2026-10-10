@@ -1,4 +1,4 @@
-"""拉取当前 6 个市场的 funding 快照 + 年化，看升水机会"""
+"""Pull funding snapshots for the 6 current markets + annualized, look for premium opportunities"""
 import asyncio
 import json
 import sys
@@ -29,16 +29,16 @@ async def main():
     task.cancel()
 
     inv = {v: k for k, v in cfg.market_ids().items()}
-    print("MKT    funding_rate   年化%      mark价       OI")
+    print("MKT    funding_rate   annual%      mark       OI")
     print("-" * 62)
     for mid in sorted(snapshot.keys(), key=lambda x: int(x)):
         sym = inv.get(mid, mid)
         f = funding.get(mid, {})
         s = snapshot.get(mid, {})
         rate = f.get("rate", 0)
-        # rate 单位需要确认：之前样例 BTC rate=-40, idx=836498，看起来是万分之几？
-        # Perpl funding rate 可能是 scaled int（除以 1e6 或类似），这里先原样显示 + 假设万分比
-        annual_pct = rate * 24 * 365 / 10000  # 假设 rate 单位是 0.01% (bps*0.01?)
+        # rate unit needs confirming: earlier sample had BTC rate=-40, idx=836498, looks like parts-per-ten-thousand?
+        # Perpl funding rate may be a scaled int (divide by 1e6 or similar); display raw for now + assume per-ten-thousand
+        annual_pct = rate * 24 * 365 / 10000  # assume rate unit is 0.01% (bps*0.01?)
         mark = s.get("mrk", 0)
         oi = s.get("oi", 0)
         print(f"{sym:<6} {rate:<14} {annual_pct:<10.2f} {mark:<12} {oi:<12}")

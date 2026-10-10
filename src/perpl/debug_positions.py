@@ -1,4 +1,4 @@
-"""打印原始 PositionsSnapshot 帧 + 账户余额"""
+"""Print raw PositionsSnapshot frames + account balance"""
 import asyncio
 import json
 import sys
